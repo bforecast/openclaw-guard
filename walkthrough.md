@@ -1,53 +1,39 @@
 # OpenClaw Host Management System
 
-This document outlines the components developed to securely orchestrate OpenClaw sandboxes using NVIDIA OpenShell on your WSL-Ubuntu host.
+This document describes the current runtime path and the blueprint target path.
 
-## Components Built
+## Current Runtime Path (Effective)
 
-### 1. The LLM Security Gateway ([`gateway.py`](file:///d:/ag-projects/guard/src/gateway.py))
-A fast, lightweight Python service built on `FastAPI`. 
-It intercepts LLM traffic destined for the OpenClaw agent. We incorporated a `security_review()` hook that currently checks for basic command injections (like `rm -rf`) before relaying traffic to the upstream provider (e.g., OpenAI/Anthropic). 
+1. OpenClaw in sandbox sends model requests to `https://inference.local/v1`.
+2. OpenShell gateway resolves `inference.local` using active provider/inference configuration.
+3. Provider `guard-gateway` forwards to `http://host.openshell.internal:8090/v1`.
+4. Host-side `src/gateway.py` performs security scan + provider routing, then calls upstream providers.
 
-### 2. The Sandbox CLI Manager ([`cli.py`](file:///d:/ag-projects/guard/src/cli.py))
-A robust command-line tool built using `Typer` that wraps the underlying `openshell` binary.
-It automates:
-- Starting the OpenShell Gateway.
-- Dynamically generating strict YAML policies that map your host workspace directly into the container and expose only the FastAPI proxy.
-- Provisioning the sandboxed OpenClaw container.
+In this path, the decisive runtime forwarding behavior is controlled by:
 
-### 3. Dependencies ([`requirements.txt`](file:///d:/ag-projects/guard/src/requirements.txt))
-Contains all necessary dependencies: `typer`, `fastapi`, `uvicorn`, `pydantic`, `httpx`, `PyYAML`.
+- `openshell provider create ... --config OPENAI_BASE_URL=http://host.openshell.internal:8090/v1`
+- `openshell inference set --provider guard-gateway --model ...`
 
----
+## Current Role Of Project Blueprint
 
-## Verification Instructions (Manual Checklist)
+`src/onboard.py` still generates project-local artifacts:
 
-Since OpenShell requires a Linux runtime with Docker, and you specified a WSL-Ubuntu Host on Windows 11, you must perform these verification steps from within your WSL terminal.
+- `nemoclaw-blueprint/policies/openclaw-sandbox.yaml`
+- `sandbox_workspace/openclaw/openclaw.json`
+- `sandbox_workspace/openclaw/agents/main/agent/auth-profiles.json`
+- `sandbox_workspace/openclaw-data/`
 
-1. **Open your WSL-Ubuntu Terminal**.
-2. **Navigate to the Source Directory**:
-   ```bash
-   cd /mnt/d/ag-projects/guard/src/
-   ```
-3. **Install Dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. **Start the LLM Security Gateway**:
-   ```bash
-   python gateway.py
-   ```
-   *(The gateway will listen on `0.0.0.0:8000` for security inference proxying).*
-5. **Install OpenShell (if not already installed)**:
-   *(Ensure Docker daemon is active on WSL)*
-   ```bash
-   curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
-   ```
-6. **Launch the Managed OpenClaw Agent**:
-   *(In a new WSL tab)*
-   ```bash
-   # Provide a path to a workspace folder you wish to safely mount
-   python cli.py start --workspace /mnt/d/ag-projects/guard/test-workspace --agent openclaw
-   ```
+But `wsl_start.sh` currently runs `nemoclaw onboard` without setting `NEMOCLAW_BLUEPRINT_PATH`, so project-local blueprint is not automatically guaranteed to be the runtime blueprint source.
 
-*You can also test the dynamic policy update by running `python cli.py set-policy openclaw-sandbox --domain api.github.com`.*
+## Blueprint-Driven Recommended Procedure
+
+Run from WSL:
+
+```bash
+cd /mnt/d/ag-projects/guard
+./.venv/bin/python src/cli.py onboard --workspace /mnt/d/ag-projects/guard
+rsync -a --delete /mnt/d/ag-projects/guard/nemoclaw-blueprint/ ~/.nemoclaw/source/nemoclaw-blueprint/
+nemoclaw onboard
+```
+
+This ensures project blueprint changes are actually consumed by NemoClaw onboarding.

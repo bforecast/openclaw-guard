@@ -1,8 +1,11 @@
-# OpenClaw SECURE Dockerization Plan (Powered by NVIDIA OpenShell)
+# OpenClaw SECURE Guard: Comprehensive Implementation Plan
 
-Based on a deep analysis of NVIDIA OpenShell and the requirements provided in `requirement.txt`, this document outlines the revised architecture. OpenShell natively solves almost all the requirements by running a lightweight K3s cluster inside Docker to enforce network, file, and LLM boundaries.
+This document outlines the strategic deployment of the OpenClaw AI agent within a security-hardened environment powered by **NVIDIA OpenShell** and **NemoClaw**. It tracks the evolution from the initial custom CLI design to the modern, three-layer "Zero-Injection" architecture.
 
-## 1. System Architecture Diagram
+---
+
+## 1. Initial System Architecture (V1-V2)
+*This section reflects the original GitHub architecture, leveraging a custom Python CLI to drive OpenShell directly.*
 
 ```mermaid
 flowchart TD
@@ -33,30 +36,81 @@ flowchart TD
     HostFS -.->|Mounted via Policy| Sandbox
 ```
 
-## 2. Requirement Breakdown & Solutions
+---
+
+## 2. Requirement Breakdown & Solutions (Original v2 Mapping)
 
 ### Requirement 1: Directory & External Access Management
-*   **Solution**: OpenShell provisions the agent sandbox seamlessly. Through our custom Python CLI, we dynamically generate OpenShell declarative YAML policies that selectively mount host directories into the OpenClaw sandbox. The OpenShell Gateway defaults to blocking all external access.
+*   **Original Solution**: OpenShell provisions the agent sandbox. Through our custom Python CLI, we dynamically generate OpenShell declarative YAML policies that selectively mount host directories.
+*   **Evolution (V4/NemoClaw)**: Switched to **Zero-Injection**. All mounts are declared in the NemoClaw Blueprint. Configs are pre-generated on the host and mounted as **Read-Only** volumes before the sandbox starts.
 
 ### Requirement 2: Network & AI Model Connection Management
-*   **Solution**: OpenShell intercepts every outbound connection. We configure `openshell policy set` to allow specific target domains. The AI Model routing is handled natively by OpenShell's Inference Provider mapping, ensuring the agent cannot bypass the host's networking rules.
+*   **Original Solution**: OpenShell intercepts every outbound connection. We configure `openshell policy set` to allow specific target domains.
+*   **Evolution (V4/NemoClaw)**: Inference routing is now a first-class citizen in the **NemoClaw Layer 2 Blueprint**. `inference.local` is enforced by OpenShell kernel rules (Layer 3) to prevent any network bypass.
 
 ### Requirement 3: CLI Program Management
-*   **Solution**: A Python CLI application (using `Typer` or `Click`) will act as the master controller. It abstracts OpenShell's commands, providing a streamlined, automated interface for the user to start OpenClaw, attach workspaces, and manage security policies without dealing with raw YAML files manually.
+*   **Original Solution**: A Python CLI application acting as the master controller to abstract OpenShell's commands.
+*   **Evolution (V4/NemoClaw)**: We now leverage the **NemoClaw CLI** (`nemoclaw launch/connect`) as the standardized workload management entry point.
 
 ### Requirement 4: LLM Forwarding & Security Review
-*   **Solution**: OpenShell natively intercepts LLM calls, strips caller credentials, and routes them. To achieve the "security review" requirement, we will configure the OpenShell Inference Provider to point to a local proxy: a lightweight Python FastAPI service running on the Host. This service will perform prompt scanning/logging before forwarding the authorized request to the actual LLM (OpenAI/Anthropic).
+*   **Original Solution**: Configure OpenShell Inference Provider to point to a local proxy: a lightweight Python FastAPI service (`gateway.py`) on the Host.
+*   **Evolution (V4/NemoClaw)**: The `gateway.py` remains the **Layer 1 Platform Node**, but its registration is handled declaratively in the `blueprint.yaml`.
 
 ### Requirement 5: Using NVIDIA OpenShell
-*   **Solution**: **Successfully Adopted.** OpenShell will be installed directly on the WSL-Ubuntu host. It will automatically orchestrate the Docker container sandboxes and the K3s policy enforcement layer. This replaces the complex and error-prone custom Docker/mitmproxy setup we previously considered, aligning perfectly with the architect's sandbox paradigm.
+*   **Successfully Adopted.** OpenShell orchestrates the Docker containers and kernel-level Landlock/Egress policies.
 
 ### Requirement 6: Development in Python
-*   **Solution**:
-    *   **Management CLI**: Python (`typer`/`subprocess` to drive `openshell`).
-    *   **LLM Security Reviewer**: Python (`fastapi`, `litellm` or `httpx` to intercept, review, and relay LLM payloads).
+*   **Solution**: **Layer 1 Proxy** (FastAPI) and **Layer 2 Blueprint Setup** (Python) maintain the Python core of the project.
 
-## 3. Implementation Phasing
-1. **Host Setup**: Install `openshell` natively on WSL-Ubuntu.
-2. **LLM Reviewer**: Code the Python FastAPI proxy to review and log outgoing prompts.
-3. **OpenShell Configuration**: Configure OpenShell Providers to route AI calls to the local Python LLM Reviewer.
-4. **CLI Development**: Build the Python CLI to wrap `openshell sandbox create --from openclaw` and inject dynamic YAML network/file policies.
+---
+
+## 3. Evolutionary Architecture (v4): The Three-Layer Model
+*To achieve the "Zero-Injection" target, we refined the architecture into three specialized layers.*
+
+```mermaid
+flowchart TD
+    subgraph Host [Host Node]
+        subgraph Layer1 [Layer 1: Platform Audit]
+            Gate[gateway.py Security Node]
+            AuditDB[(security_audit.db)]
+        end
+        subgraph Layer2 [Layer 2: NemoClaw Orchestrator]
+            BP[blueprint.yaml / onboard.py]
+            W_Space[(Host Config Workspace)]
+        end
+    end
+
+    subgraph Layer3 [Layer 3: OpenShell Runtime]
+        Policy[Policy enforced via Landlock]
+        subgraph SB [Sandbox]
+            OC[OpenClaw Agent]
+            MNT[/sandbox/.openclaw - RO Mount/]
+        end
+    end
+
+    BP -->|Pre-generates| W_Space
+    BP -->|Launch| Layer3
+    W_Space -->|Natively Mounts| MNT
+    OC -.->|Intercepted| Gate
+    Gate -->|Audits| AuditDB
+```
+
+## 4. Current Effective Runtime (As Of 2026-03-31)
+
+This section clarifies the currently effective control plane in production use.
+
+1. **Sandbox egress entrypoint** is still `inference.local`.
+2. **Actual forward target (`host.openshell.internal:8090`)** is determined by OpenShell provider config:
+   - `openshell provider create ... --config OPENAI_BASE_URL=http://host.openshell.internal:8090/v1`
+   - `openshell inference set --provider guard-gateway --model ...`
+3. **Current `wsl_start.sh` flow does not explicitly set `NEMOCLAW_BLUEPRINT_PATH`**.
+4. Therefore, **project-local `nemoclaw-blueprint/blueprint.yaml` is not automatically the runtime source of truth** unless explicitly synchronized/selected.
+
+## 5. Blueprint-Driven Target State
+
+To make blueprint the real source of truth end-to-end:
+
+1. Generate artifacts via `src/cli.py onboard`.
+2. Synchronize project `nemoclaw-blueprint/` into NemoClaw runtime blueprint directory before onboarding.
+3. Run `nemoclaw onboard` after synchronization.
+4. Validate that runtime blueprint and project blueprint are identical.

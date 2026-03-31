@@ -1,0 +1,39 @@
+# NemoClaw Blueprint: OpenClaw Secure Guard
+# Layer 2 Orchestrator Metadata
+
+version: "0.1.0"
+min_openshell_version: "0.0.19"
+min_openclaw_version: "2026.3.11"
+
+description: |
+  Zero-Injection Blueprint for OpenClaw. 
+  Orchestrates secure inference routing via a host-side auditable gateway.
+
+components:
+  sandbox:
+    image: "ghcr.io/nvidia/openshell-community/sandboxes/openclaw:latest"
+    name: "openclaw-sandbox"
+    # Port for the TUI / Dashboard
+    forward_ports:
+      - 18789
+
+  inference:
+    profiles:
+      # Default profile: routes all LLM calls through our security gateway (Layer 1)
+      guard:
+        provider_type: "openai"
+        provider_name: "guard-gateway"
+        # Points to our host-side FastAPI proxy
+        endpoint: "http://host.openshell.internal:8090/v1"
+        credential_env: "OPENCLAW_GATEWAY_TOKEN"
+        credential_default: "guard-managed"
+
+  policy:
+    # Points to Layer 3 Policy (defined in policies/ folder)
+    base: "nemoclaw-blueprint/policies/openclaw-sandbox.yaml"
+
+# Symlink persistence mappings (Official NemoClaw pattern)
+# Prevents agent from modifying immutable config while allowing state persistence.
+mappings:
+  - { host: "sandbox_workspace/openclaw", container: "/sandbox/.openclaw", mode: "ro" }
+  - { host: "sandbox_workspace/openclaw-data", container: "/sandbox/.openclaw-data", mode: "rw" }

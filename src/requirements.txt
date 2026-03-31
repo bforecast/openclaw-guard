@@ -1,3 +1,5 @@
-typer==0.15.2
-mitmproxy==10.3.1
-PyYAML==6.0.1
+typer
+pyyaml
+fastapi
+uvicorn[standard]
+httpx

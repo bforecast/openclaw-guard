@@ -33,3 +33,9 @@ venv.bak/
 # Project specific
 policies/
 .openshell/
+.openshell_byoc/
+logs/
+sandbox_workspace/
+src/logs/
+*.mitm
+*.out
