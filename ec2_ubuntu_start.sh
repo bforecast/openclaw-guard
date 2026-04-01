@@ -65,9 +65,10 @@ fi
 
 # Ensure current user can access docker
 if ! docker info >/dev/null 2>&1; then
-  echo "Warning: Current user cannot access Docker without sudo."
-  echo "Attempting to fix permissions (might require relogin, but we will try anyway)..."
+  echo "Warning: Current user cannot access Docker. Fixing socket permissions..."
   sudo usermod -aG docker "$USER" || true
+  # Dynamic fix to avoid relogin
+  sudo chmod 666 /var/run/docker.sock || true
 fi
 
 if [[ ! -d "$VENV_DIR" ]]; then
