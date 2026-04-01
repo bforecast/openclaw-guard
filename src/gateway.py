@@ -111,6 +111,13 @@ def resolve_provider(model: str) -> tuple[str, dict, str]:
     if "/" in model and os.environ.get("OPENROUTER_API_KEY"):
         return "openrouter", PROVIDERS["openrouter"], model
 
+    # 3. Final Fallback: If no match, use the first configured provider we can find.
+    # This prevents 503/401 errors when using custom models through our gateway.
+    for p_name, p_cfg in PROVIDERS.items():
+        if os.environ.get(p_cfg["api_key_env"]):
+            log.info(f"Unrecognized model '{model}', falling back to configured provider: {p_name}")
+            return p_name, p_cfg, model
+
     return DEFAULT_PROVIDER, PROVIDERS[DEFAULT_PROVIDER], model
 
 
