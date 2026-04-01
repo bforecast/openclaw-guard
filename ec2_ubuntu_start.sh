@@ -3,33 +3,56 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$PROJECT_DIR/src"
-VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
+VENV_DIR="$PROJECT_DIR/.venv"
+VENV_PYTHON="$VENV_DIR/bin/python"
 GATEWAY_PORT="${GATEWAY_PORT:-8090}"
 MODEL_ID="${MODEL_ID:-openrouter/stepfun/step-3.5-flash:free}"
 OPENSHELL_GATEWAY_NAME="${OPENSHELL_GATEWAY_NAME:-nemoclaw}"
 
-# NemoClaw installer places the CLI in ~/.local/bin by default.
+# NemoClaw installer usually places shims here.
 export PATH="$HOME/.local/bin:$PATH"
 
-if ! grep -qi "microsoft" /proc/version 2>/dev/null; then
-  echo "This script is WSL-Ubuntu only."
-  echo "Open a WSL terminal and run it there."
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "This script is for Linux (AWS EC2 Ubuntu)."
   exit 1
 fi
 
-if [[ ! -x "$VENV_PYTHON" ]]; then
-  echo "Virtualenv Python not found at $VENV_PYTHON"
-  echo "Create the venv in WSL first, then install dependencies:"
-  echo "  python3 -m venv .venv"
-  echo "  .venv/bin/pip install -r src/requirements.txt"
+if ! command -v apt-get >/dev/null 2>&1; then
+  echo "apt-get not found. This script targets Ubuntu/Debian."
   exit 1
 fi
 
-if ! command -v nemoclaw >/dev/null 2>&1; then
-  echo "nemoclaw is not installed or not on PATH."
-  echo "Install it first, then rerun this script."
+echo "[0/7] Installing base dependencies..."
+sudo apt-get update -y
+sudo apt-get install -y \
+  ca-certificates \
+  curl \
+  git \
+  jq \
+  lsof \
+  psmisc \
+  python3 \
+  python3-pip \
+  python3-venv
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker is required but not installed."
+  echo "Install Docker first, then rerun this script."
   exit 1
 fi
+
+if ! sudo systemctl is-active --quiet docker; then
+  echo "Starting Docker service..."
+  sudo systemctl start docker
+fi
+
+if [[ ! -d "$VENV_DIR" ]]; then
+  echo "Creating virtualenv at $VENV_DIR ..."
+  python3 -m venv "$VENV_DIR"
+fi
+
+echo "Installing Python requirements..."
+"$VENV_DIR/bin/pip" install -r "$SRC_DIR/requirements.txt"
 
 if [[ -f "$PROJECT_DIR/.env" ]]; then
   echo "Loading API keys from .env..."
@@ -43,13 +66,34 @@ echo "Provider keys:"
 [[ -n "${OPENAI_API_KEY:-}" ]] && echo "  OK OpenAI" || echo "  WARN OpenAI not set"
 [[ -n "${ANTHROPIC_API_KEY:-}" ]] && echo "  OK Anthropic" || echo "  WARN Anthropic not set"
 [[ -n "${OPENROUTER_API_KEY:-}" ]] && echo "  OK OpenRouter" || echo "  WARN OpenRouter not set"
+[[ -n "${NVIDIA_API_KEY:-}" ]] && echo "  OK NVIDIA" || echo "  WARN NVIDIA not set"
 echo
 
-echo "[1/5] Starting security gateway..."
+if ! command -v nemoclaw >/dev/null 2>&1; then
+  echo "[1/7] Installing NemoClaw (official installer)..."
+  if [[ -n "${NVIDIA_API_KEY:-}" ]]; then
+    NEMOCLAW_NON_INTERACTIVE=1 curl -fsSL https://nvidia.com/nemoclaw.sh | bash -s -- --non-interactive
+  else
+    echo "NVIDIA_API_KEY is not set."
+    echo "Running interactive NemoClaw installer (choose provider/model as needed)..."
+    curl -fsSL https://nvidia.com/nemoclaw.sh | bash
+  fi
+fi
+
+if ! command -v nemoclaw >/dev/null 2>&1; then
+  echo "nemoclaw is still not on PATH. Try: export PATH=\"$HOME/.local/bin:\$PATH\""
+  exit 1
+fi
+
+if ! command -v openshell >/dev/null 2>&1; then
+  echo "openshell CLI not found after NemoClaw install."
+  exit 1
+fi
+
+echo "[2/7] Starting security gateway..."
 mkdir -p "$PROJECT_DIR/logs"
 fuser -k "${GATEWAY_PORT}/tcp" 2>/dev/null || true
 nohup "$VENV_PYTHON" "$SRC_DIR/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
-GATEWAY_PID=$!
 
 for _ in $(seq 1 20); do
   if curl -fsS "http://127.0.0.1:${GATEWAY_PORT}/health" >/dev/null 2>&1; then
@@ -60,7 +104,7 @@ for _ in $(seq 1 20); do
 done
 
 echo
-echo "[2/5] Preparing blueprint artifacts..."
+echo "[3/7] Preparing blueprint artifacts..."
 "$VENV_PYTHON" "$SRC_DIR/cli.py" onboard --workspace "$PROJECT_DIR" --gateway-port "$GATEWAY_PORT"
 POLICY_PATH="$PROJECT_DIR/nemoclaw-blueprint/policies/openclaw-sandbox.yaml"
 if [[ ! -s "$POLICY_PATH" ]]; then
@@ -71,25 +115,21 @@ echo "  Policy file verified: $POLICY_PATH"
 head -n 8 "$POLICY_PATH"
 
 echo
-echo "[3/5] Resetting OpenShell gateway for NemoClaw onboarding..."
+echo "[4/7] Ensuring OpenShell gateway reset for onboarding..."
 openshell gateway destroy --name openshell >/dev/null 2>&1 || true
 
 echo
-echo "[4/5] Running NemoClaw onboarding..."
+echo "[5/7] Running NemoClaw onboarding..."
 cd "$PROJECT_DIR"
 if [[ -n "${NVIDIA_API_KEY:-}" ]]; then
   nemoclaw onboard --non-interactive
 else
-  echo "NVIDIA_API_KEY is not set."
-  echo "Run this manually and choose your provider (for example OpenRouter):"
-  echo "  nemoclaw onboard"
-  echo
-  echo "After onboarding completes, rerun ./wsl_start.sh"
-  exit 1
+  echo "NVIDIA_API_KEY is not set. Running interactive onboard..."
+  nemoclaw onboard
 fi
 
 echo
-echo "[5/6] Switching OpenShell inference to guard-gateway..."
+echo "[6/7] Forcing inference route to guard-gateway (no injection)..."
 OPENSHELL_GATEWAY="$OPENSHELL_GATEWAY_NAME" openshell provider delete guard-gateway >/dev/null 2>&1 || true
 OPENSHELL_GATEWAY="$OPENSHELL_GATEWAY_NAME" openshell provider create \
   --name guard-gateway \
@@ -104,11 +144,12 @@ OPENSHELL_GATEWAY="$OPENSHELL_GATEWAY_NAME" openshell inference set \
 OPENSHELL_GATEWAY="$OPENSHELL_GATEWAY_NAME" openshell inference get || true
 
 echo
-echo "[6/6] Checking NemoClaw status..."
+echo "[7/7] Final status..."
 nemoclaw status || true
 nemoclaw list || true
 
 echo
 echo "Done."
 echo "Gateway log: $PROJECT_DIR/logs/gateway.log"
-echo "Sandbox connect: nemoclaw <sandbox-name> connect"
+echo "Connect sandbox: nemoclaw <sandbox-name> connect"
+echo "Verify route: send 'hi' in openclaw tui, then check gateway log for POST /v1/responses"

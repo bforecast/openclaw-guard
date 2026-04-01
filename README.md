@@ -43,6 +43,12 @@ flowchart LR
 - OpenShell / NemoClaw 已安装并可在 WSL 中运行
 - 已准备 `.venv` 和依赖（`requirements.txt`）
 
+### AWS EC2 Ubuntu 额外要求
+
+- Ubuntu 22.04/24.04
+- Docker 已安装并运行（`systemctl status docker`）
+- 当前用户具备 `sudo` 权限
+
 ## 安装与启动（WSL）
 
 1. 进入项目目录
@@ -94,6 +100,54 @@ openshell inference get
 # 或手动:
 nemoclaw onboard
 ```
+
+## 安装与启动（AWS EC2 Ubuntu）
+
+1. 拉取项目（示例路径使用 `~/guard`，不是 `/mnt/d/...`）
+
+```bash
+cd ~
+git clone <your-repo-url> guard
+cd ~/guard
+```
+
+2. 配置密钥（`.env`）
+
+```env
+OPENROUTER_API_KEY=...
+# 可选：如果设置了 NVIDIA_API_KEY，nemoclaw onboard 会默认走 nvidia provider
+NVIDIA_API_KEY=...
+```
+
+3. 一键安装并启动
+
+```bash
+chmod +x ~/guard/ec2_ubuntu_start.sh
+~/guard/ec2_ubuntu_start.sh
+```
+
+更简化（推荐首次使用）：
+
+```bash
+chmod +x ~/guard/ec2_bootstrap.sh
+~/guard/ec2_bootstrap.sh
+```
+
+说明：`ec2_bootstrap.sh` 会先安装系统依赖和 Docker，再调用 `ec2_ubuntu_start.sh`。
+如果首次运行提示需要 `newgrp docker`/重新登录，执行后再重跑一次即可。
+
+4. 验证链路是否命中本项目网关（8090）
+
+```bash
+tail -f ~/guard/logs/gateway.log
+```
+
+在 `openclaw tui` 里发送 `hi`，日志应出现 `POST /v1/responses`。
+
+说明（关键）：  
+`nemoclaw onboard` 会把 `inference.local` 设为 `nvidia-prod`（若检测到 NVIDIA 路线），覆盖 guard 路由。  
+`ec2_ubuntu_start.sh` 已在 onboard 后强制切回：
+`inference.local -> guard-gateway -> http://host.openshell.internal:8090/v1`（不注入）。
 
 ## 测试
 
