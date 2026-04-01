@@ -216,9 +216,19 @@ openshell provider update guard --credential "$BEST_CRED" --config OPENAI_BASE_U
 # Ensure we use an appropriate default model for verification
 # Using a FREE model by default to prevent 402 errors on low-balance accounts
 FINAL_MODEL="stepfun/step-3.5-flash:free"
-if [[ "$BEST_CRED" == "ANTHROPIC_API_KEY" ]]; then FINAL_MODEL="claude-3-5-sonnet-20240620"; fi
-if [[ -n "${NEMOCLAW_MODEL:-}" ]]; then FINAL_MODEL="$NEMOCLAW_MODEL"; fi
+echo "  Default model: $FINAL_MODEL"
 
+if [[ "$BEST_CRED" == "ANTHROPIC_API_KEY" ]]; then 
+    FINAL_MODEL="claude-3-5-sonnet-20240620"; 
+    echo "  Detected Anthropic key, switching to: $FINAL_MODEL"
+fi
+
+if [[ -n "${NEMOCLAW_MODEL:-}" ]]; then 
+    FINAL_MODEL="$NEMOCLAW_MODEL"
+    echo "  User override (NEMOCLAW_MODEL) detected, using: $FINAL_MODEL"
+fi
+
+echo "  Applying final inference route: provider=guard, model=$FINAL_MODEL"
 openshell inference set --provider guard --model "$FINAL_MODEL" --no-verify || true
 
 # ---------------------------------------------------------------------------
