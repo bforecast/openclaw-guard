@@ -166,6 +166,19 @@ tail -f ~/guard/logs/gateway.log
 - Chat 无输出但网关返回 200  
   先看 `logs/gateway_runtime.log`，确认是否上游 402/429 或模型选择问题。
 
+- `nemoclaw: command not found` (AWS EC2)  
+  安装器完成安装后，当前 Shell 可能未刷新路径。
+  **修复：** 执行 `export PATH="/home/ubuntu/.local/bin:$PATH"`，并确保 NVM 环境已加载：
+  ```bash
+  export NVM_DIR="$HOME/.nvm"
+  [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+  ```
+
+## 硬件与环境参考 (AWS EC2)
+
+- **已验证环境**：AWS EC2 `m7i-flex.large` (4x vCPU, 40GB RAM)。
+- **Swap 要求**：即使物理内存充足（如 40GB），NemoClaw/Node.js 在构建依赖过程中仍可能需要 **4GB Swap** 空间。若安装器提示创建 Swap，请务必选择 **Yes**，否则可能导致安装进程卡死或假死。
+
 ## Blueprint 说明
 
 本项目包含 `nemoclaw-blueprint/` 作为目标态配置。  

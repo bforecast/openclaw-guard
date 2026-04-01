@@ -53,12 +53,22 @@ PROVIDERS = {
         "responses_endpoint": "/responses",
         "stream_media_type": "text/event-stream",
     },
+    "nvidia": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "api_key_env": "NVIDIA_API_KEY",
+        "auth_header": "Authorization",
+        "auth_prefix": "Bearer ",
+        "endpoint": "/chat/completions",
+        "responses_endpoint": "/responses",
+        "stream_media_type": "text/event-stream",
+    },
 }
 
 MODEL_ROUTES = [
     (r"^(gpt-|o1-|o3-|o4-|dall-e|tts-|whisper)", "openai"),
     (r"^claude-", "anthropic"),
     (r"^openrouter/", "openrouter"),
+    (r"^(nvidia/|meta/|mistralai/|google/|microsoft/)", "nvidia"),
 ]
 
 DEFAULT_PROVIDER = "openrouter"
@@ -88,11 +98,11 @@ def resolve_provider(model: str) -> tuple[str, dict, str]:
     for pattern, provider_name in MODEL_ROUTES:
         if re.match(pattern, model, re.IGNORECASE):
             config = PROVIDERS[provider_name]
-            cleaned_model = (
-                re.sub(r"^openrouter/", "", model)
-                if provider_name == "openrouter"
-                else model
-            )
+            cleaned_model = model
+            if provider_name == "openrouter":
+                cleaned_model = re.sub(r"^openrouter/", "", model)
+            elif provider_name == "nvidia":
+                cleaned_model = re.sub(r"^nvidia/", "", model)
             return provider_name, config, cleaned_model
 
     return DEFAULT_PROVIDER, PROVIDERS[DEFAULT_PROVIDER], model

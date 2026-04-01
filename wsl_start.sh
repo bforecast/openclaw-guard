@@ -73,9 +73,12 @@ head -n 8 "$POLICY_PATH"
 echo
 echo "[3/5] Resetting OpenShell gateway for NemoClaw onboarding..."
 openshell gateway destroy --name openshell >/dev/null 2>&1 || true
-
 echo
 echo "[4/5] Running NemoClaw onboarding..."
+# Ensure the project blueprint is seen by the onboard command
+if [[ ! -f "blueprint.yaml" && -f "nemoclaw-blueprint/blueprint.yaml" ]]; then
+  ln -sf "nemoclaw-blueprint/blueprint.yaml" .
+fi
 cd "$PROJECT_DIR"
 if [[ -n "${NVIDIA_API_KEY:-}" ]]; then
   nemoclaw onboard --non-interactive

@@ -12,6 +12,13 @@ OPENSHELL_GATEWAY_NAME="${OPENSHELL_GATEWAY_NAME:-nemoclaw}"
 # NemoClaw installer usually places shims here.
 export PATH="$HOME/.local/bin:$PATH"
 
+# Load NVM if it exists (crucial for Node-based tools like NemoClaw)
+export NVM_DIR="$HOME/.nvm"
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+    \. "$NVM_DIR/nvm.sh"
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "This script is for Linux (AWS EC2 Ubuntu)."
   exit 1
@@ -80,6 +87,12 @@ if ! command -v nemoclaw >/dev/null 2>&1; then
   fi
 fi
 
+# Refresh environment after potential nvm/nemoclaw installation
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+    \. "$NVM_DIR/nvm.sh"
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
 if ! command -v nemoclaw >/dev/null 2>&1; then
   echo "nemoclaw is still not on PATH. Try: export PATH=\"$HOME/.local/bin:\$PATH\""
   exit 1
@@ -120,11 +133,16 @@ openshell gateway destroy --name openshell >/dev/null 2>&1 || true
 
 echo
 echo "[5/7] Running NemoClaw onboarding..."
+# Ensure the project blueprint is seen by the onboard command
+if [[ ! -f "blueprint.yaml" && -f "nemoclaw-blueprint/blueprint.yaml" ]]; then
+  ln -sf "nemoclaw-blueprint/blueprint.yaml" .
+fi
 cd "$PROJECT_DIR"
-if [[ -n "${NVIDIA_API_KEY:-}" ]]; then
+if [[ -n "${NVIDIA_API_KEY:-}" || -n "${OPENROUTER_API_KEY:-}" || -n "${OPENAI_API_KEY:-}" || -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  echo "Key detected. Using non-interactive onboard..."
   nemoclaw onboard --non-interactive
 else
-  echo "NVIDIA_API_KEY is not set. Running interactive onboard..."
+  echo "No keys detected. Running interactive onboard..."
   nemoclaw onboard
 fi
 
