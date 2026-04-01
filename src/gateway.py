@@ -614,10 +614,13 @@ async def responses(request: Request):
             "output_text": "OK", "model": body.get("model", "unknown")
         })
 
-    model = body.get("model", "unknown")
-    is_streaming = body.get("stream", False)
-
+    # [BYPASS] Inject low max_tokens to bypass OpenRouter 16k token reserve (402)
     provider_name, provider_cfg, cleaned_model = resolve_provider(model)
+    if provider_name == "openrouter" and "max_tokens" not in body:
+        log.info("Injecting default max_tokens: 1024 for OpenRouter compatibility.")
+        body["max_tokens"] = 1024
+    
+    is_streaming = body.get("stream", False)
     api_key = get_api_key(provider_cfg)
 
     if not api_key:

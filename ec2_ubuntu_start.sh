@@ -196,7 +196,8 @@ openshell provider create --name guard --type openai --credential "$BEST_CRED" -
 openshell provider update guard --credential "$BEST_CRED" --config OPENAI_BASE_URL=http://${HOST_ADDR}:8090/v1
 
 # Ensure we use an appropriate default model for verification
-FINAL_MODEL="openai/gpt-4o-mini"
+# Using a FREE model by default to prevent 402 errors on low-balance accounts
+FINAL_MODEL="stepfun/step-3.5-flash:free"
 if [[ "$BEST_CRED" == "ANTHROPIC_API_KEY" ]]; then FINAL_MODEL="claude-3-5-sonnet-20240620"; fi
 if [[ -n "${NEMOCLAW_MODEL:-}" ]]; then FINAL_MODEL="$NEMOCLAW_MODEL"; fi
 
