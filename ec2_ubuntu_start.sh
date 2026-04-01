@@ -179,10 +179,24 @@ nemoclaw launch 2>/dev/null || echo "  Sandbox registered. Use 'nemoclaw connect
 # [6/7] Final Inference Routing (Ensuring bypass)
 # ---------------------------------------------------------------------------
 echo "[6/7] Forcing security gateway as primary inference route"
-openshell provider create --name guard --type openai --credential OPENROUTER_API_KEY --config OPENAI_BASE_URL=http://localhost:8090/v1 || \
-openshell provider update guard --credential OPENROUTER_API_KEY --config OPENAI_BASE_URL=http://localhost:8090/v1
-# Use --no-verify to skip another probe during final routing
-openshell inference set --provider guard --model openai/gpt-4o-mini --no-verify || true
+# Dynamically select the best credential to pass to OpenShell
+BEST_CRED="OPENROUTER_API_KEY"
+if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+    if [[ -n "${OPENAI_API_KEY:-}" ]]; then BEST_CRED="OPENAI_API_KEY";
+    elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then BEST_CRED="ANTHROPIC_API_KEY";
+    elif [[ -n "${NVIDIA_API_KEY:-}" ]]; then BEST_CRED="NVIDIA_API_KEY";
+    fi
+fi
+
+openshell provider create --name guard --type openai --credential "$BEST_CRED" --config OPENAI_BASE_URL=http://localhost:8090/v1 || \
+openshell provider update guard --credential "$BEST_CRED" --config OPENAI_BASE_URL=http://localhost:8090/v1
+
+# Ensure we use an appropriate default model for verification
+FINAL_MODEL="openai/gpt-4o-mini"
+if [[ "$BEST_CRED" == "ANTHROPIC_API_KEY" ]]; then FINAL_MODEL="claude-3-5-sonnet-20240620"; fi
+if [[ -n "${NEMOCLAW_MODEL:-}" ]]; then FINAL_MODEL="$NEMOCLAW_MODEL"; fi
+
+openshell inference set --provider guard --model "$FINAL_MODEL" --no-verify || true
 
 # ---------------------------------------------------------------------------
 # [7/7] Summary
