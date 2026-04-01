@@ -188,8 +188,12 @@ if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
     fi
 fi
 
-openshell provider create --name guard --type openai --credential "$BEST_CRED" --config OPENAI_BASE_URL=http://localhost:8090/v1 || \
-openshell provider update guard --credential "$BEST_CRED" --config OPENAI_BASE_URL=http://localhost:8090/v1
+# IMPORTANT: In Docker, localhost refers to the container. 
+# Use host.openshell.internal to reach the host gateway from the sandbox.
+HOST_ADDR="host.openshell.internal"
+
+openshell provider create --name guard --type openai --credential "$BEST_CRED" --config OPENAI_BASE_URL=http://${HOST_ADDR}:8090/v1 || \
+openshell provider update guard --credential "$BEST_CRED" --config OPENAI_BASE_URL=http://${HOST_ADDR}:8090/v1
 
 # Ensure we use an appropriate default model for verification
 FINAL_MODEL="openai/gpt-4o-mini"
