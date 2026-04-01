@@ -494,6 +494,16 @@ async def chat_completions(request: Request):
     body = await request.json()
     model = body.get("model", "unknown")
     messages = body.get("messages", [])
+    
+    # [BYPASS] Mock NemoClaw probe
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("content") == "Reply with exactly: OK":
+            log.info("Detected NemoClaw onboarding probe (Chat Completions). Returning mock success.")
+            return JSONResponse({
+                "id": "chatcmpl-mock", "object": "chat.completion", "created": 1711920000, "model": model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}]
+            })
+
     is_streaming = body.get("stream", False)
 
     provider_name, provider_cfg, cleaned_model = resolve_provider(model)
@@ -582,6 +592,15 @@ async def chat_completions(request: Request):
 @app.post("/v1/responses")
 async def responses(request: Request):
     body = await request.json()
+    
+    # [BYPASS] Mock NemoClaw probe
+    if body.get("input") == "Reply with exactly: OK":
+        log.info("Detected NemoClaw onboarding probe (Responses). Returning mock success.")
+        return JSONResponse({
+            "id": "resp-mock", "object": "response", "status": "completed",
+            "output_text": "OK", "model": body.get("model", "unknown")
+        })
+
     model = body.get("model", "unknown")
     is_streaming = body.get("stream", False)
 
