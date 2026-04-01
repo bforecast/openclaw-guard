@@ -42,15 +42,32 @@ sudo apt-get install -y \
   python3-pip \
   python3-venv
 
+echo "System Health Check:"
+df -h | grep '^/dev/' || true
+free -m
+echo
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required but not installed."
   echo "Install Docker first, then rerun this script."
   exit 1
 fi
 
+echo "Ensuring Docker service is active..."
+sudo systemctl start docker || true
+sleep 2
+
 if ! sudo systemctl is-active --quiet docker; then
-  echo "Starting Docker service..."
-  sudo systemctl start docker
+  echo "Error: Docker service is not running and could not be started."
+  sudo systemctl status docker --no-pager
+  exit 1
+fi
+
+# Ensure current user can access docker
+if ! docker info >/dev/null 2>&1; then
+  echo "Warning: Current user cannot access Docker without sudo."
+  echo "Attempting to fix permissions (might require relogin, but we will try anyway)..."
+  sudo usermod -aG docker "$USER" || true
 fi
 
 if [[ ! -d "$VENV_DIR" ]]; then
