@@ -176,8 +176,8 @@ tail -f ~/guard/logs/gateway.log
 
 ## 硬件与环境参考 (AWS EC2)
 
-- **已验证环境**：AWS EC2 `m7i-flex.large` (4x vCPU, 40GB RAM)。
-- **Swap 要求**：即使物理内存充足（如 40GB），NemoClaw/Node.js 在构建依赖过程中仍可能需要 **4GB Swap** 空间。若安装器提示创建 Swap，请务必选择 **Yes**，否则可能导致安装进程卡死或假死。
+- **已验证环境**：AWS EC2 `m7i-flex.large` (2x vCPU, 8GB RAM, 40GB Disk)。
+- **Swap 要求**：在 8GB 物理内存环境下，NemoClaw/Node.js 在构建依赖过程中**必须配置 4GB Swap** 空间。若安装器提示创建 Swap，请务必选择 **Yes**，否则安装进程在执行 `npm install` 时极易导致系统假死。
 
 ## Blueprint 说明
 
