@@ -95,6 +95,7 @@ log = logging.getLogger("security-gateway")
 
 
 def resolve_provider(model: str) -> tuple[str, dict, str]:
+    # 1. Try explicit matching
     for pattern, provider_name in MODEL_ROUTES:
         if re.match(pattern, model, re.IGNORECASE):
             config = PROVIDERS[provider_name]
@@ -104,6 +105,11 @@ def resolve_provider(model: str) -> tuple[str, dict, str]:
             elif provider_name == "nvidia":
                 cleaned_model = re.sub(r"^nvidia/", "", model)
             return provider_name, config, cleaned_model
+
+    # 2. Heuristic: If it looks like a tiered model ID (e.g. stepfun/...) and 
+    # OpenRouter is configured, assume it's an OpenRouter model.
+    if "/" in model and os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter", PROVIDERS["openrouter"], model
 
     return DEFAULT_PROVIDER, PROVIDERS[DEFAULT_PROVIDER], model
 
