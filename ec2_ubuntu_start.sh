@@ -92,7 +92,7 @@ export COMPATIBLE_API_KEY="${OPENROUTER_API_KEY:-${OPENAI_API_KEY:-mock-key}}"
 "$VENV_PYTHON" "$SRC_DIR/cli.py" onboard --workspace "$PROJECT_DIR" --gateway-port "$GATEWAY_PORT"
 
 # Run onboarding
-nemoclaw onboard --non-interactive --workspace "$PROJECT_DIR"
+nemoclaw onboard --non-interactive
 
 # 8. Final Inference Setup (The "Golden" Route)
 echo "[6/7] Final Inference Routing (Ensuring bypass)..."
