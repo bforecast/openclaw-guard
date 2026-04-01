@@ -140,6 +140,17 @@ fi
 cd "$PROJECT_DIR"
 if [[ -n "${NVIDIA_API_KEY:-}" || -n "${OPENROUTER_API_KEY:-}" || -n "${OPENAI_API_KEY:-}" || -n "${ANTHROPIC_API_KEY:-}" ]]; then
   echo "Key detected. Using non-interactive onboard..."
+  # If NVIDIA_API_KEY is missing but other keys exist, specify a provider
+  # to prevent the non-interactive installer from defaulting to NVIDIA and failing.
+  if [[ -z "${NVIDIA_API_KEY:-}" ]]; then
+    export NVIDIA_API_KEY="skip"
+    if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+        export NEMOCLAW_PROVIDER="openai"
+        export OPENAI_API_KEY="${OPENROUTER_API_KEY}"
+    elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        export NEMOCLAW_PROVIDER="anthropic"
+    fi
+  fi
   nemoclaw onboard --non-interactive
 else
   echo "No keys detected. Running interactive onboard..."
