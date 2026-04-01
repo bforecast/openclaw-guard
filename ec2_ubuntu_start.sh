@@ -148,6 +148,7 @@ if [[ -n "${NVIDIA_API_KEY:-}" || -n "${OPENROUTER_API_KEY:-}" || -n "${OPENAI_A
         export NEMOCLAW_PROVIDER="custom"
         export NEMOCLAW_ENDPOINT_URL="https://openrouter.ai/api/v1"
         export COMPATIBLE_API_KEY="${OPENROUTER_API_KEY}"
+        export NEMOCLAW_MODEL="openai/gpt-4o-mini"
     elif [[ -n "${OPENAI_API_KEY:-}" ]]; then
         export NEMOCLAW_PROVIDER="openai"
     elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
