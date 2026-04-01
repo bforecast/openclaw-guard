@@ -80,8 +80,8 @@ DB_PATH = LOG_DIR / "security_audit.db"
 DANGEROUS_PATTERNS = [
     r"\brm\s+-rf\b",
     r"\bmkfs\b",
-    r"\bdd\s+if=\b",
-    r"\b:\(\)\s*\{\s*:\|\s*:\s*&\s*\}\s*;\s*:\b",
+    r"\bdd\s+if=",
+    r":\(\)\s*\{\s*:\|\s*:\s*&\s*\}\s*;",
     r"\bchmod\s+777\b",
     r"\bcurl\b.*\|\s*bash",
     r"\bwget\b.*\|\s*sh",
