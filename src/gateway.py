@@ -496,6 +496,9 @@ async def list_models():
                 models = data.get("data", data.get("models", []))
                 for model in models:
                     model["_provider"] = provider_name
+                    # Prefix IDs for non-default providers to trigger routing
+                    if provider_name != "openai" and not model["id"].startswith(f"{provider_name}/"):
+                        model["id"] = f"{provider_name}/{model['id']}"
                 all_models.extend(models)
         except Exception:
             pass

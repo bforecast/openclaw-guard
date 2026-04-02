@@ -1,11 +1,11 @@
 # OpenClaw SECURE Guard: Comprehensive Implementation Plan
 
-This document outlines the strategic deployment of the OpenClaw AI agent within a security-hardened environment powered by **NVIDIA OpenShell** and **NemoClaw**. It tracks the evolution from the initial custom CLI design to the modern, three-layer "Zero-Injection" architecture.
+This document outlines the strategic deployment of the OpenClaw AI agent within a security-hardened environment powered by **NVIDIA OpenShell** and **NemoClaw**. It tracks the evolution from the initial custom CLI design to the modern, 100% Blueprint-driven architecture.
 
 ---
 
 ## 1. Initial System Architecture (V1-V2)
-*This section reflects the original GitHub architecture, leveraging a custom Python CLI to drive OpenShell directly.*
+*This section reflects the original architecture, leveraging a custom Python CLI to drive OpenShell directly.*
 
 ```mermaid
 flowchart TD
@@ -38,79 +38,87 @@ flowchart TD
 
 ---
 
-## 2. Requirement Breakdown & Solutions (Original v2 Mapping)
+## 2. Requirement Breakdown & Evolution
 
 ### Requirement 1: Directory & External Access Management
-*   **Original Solution**: OpenShell provisions the agent sandbox. Through our custom Python CLI, we dynamically generate OpenShell declarative YAML policies that selectively mount host directories.
-*   **Evolution (V4/NemoClaw)**: Switched to **Zero-Injection**. All mounts are declared in the NemoClaw Blueprint. Configs are pre-generated on the host and mounted as **Read-Only** volumes before the sandbox starts.
+*   **Evolution**: Switched to **Zero-Injection**. All mounts are declared in the NemoClaw Blueprint. Host directories are mounted as **Read-Only** volumes by the orchestrator before the sandbox starts.
 
 ### Requirement 2: Network & AI Model Connection Management
-*   **Original Solution**: OpenShell intercepts every outbound connection. We configure `openshell policy set` to allow specific target domains.
-*   **Evolution (V4/NemoClaw)**: Inference routing is now a first-class citizen in the **NemoClaw Layer 2 Blueprint**. `inference.local` is enforced by OpenShell kernel rules (Layer 3) to prevent any network bypass.
+*   **Evolution**: Inference routing is now a first-class citizen in the **NemoClaw Layer 2 Blueprint**. `inference.local` is enforced by OpenShell kernel rules (Layer 3) to prevent any network bypass.
 
-### Requirement 3: CLI Program Management
-*   **Original Solution**: A Python CLI application acting as the master controller to abstract OpenShell's commands.
-*   **Evolution (V4/NemoClaw)**: We now leverage the **NemoClaw CLI** (`nemoclaw launch/connect`) as the standardized workload management entry point.
+### Requirement 3: LLM Forwarding & Security Review
+*   **Evolution**: The `gateway.py` (Layer 1) remains the security arbiter. It handles pattern matching (e.g., blocking `rm -rf`) and upstream provider failover (e.g., 429 retries).
 
-### Requirement 4: LLM Forwarding & Security Review
-*   **Original Solution**: Configure OpenShell Inference Provider to point to a local proxy: a lightweight Python FastAPI service (`gateway.py`) on the Host.
-*   **Evolution (V4/NemoClaw)**: The `gateway.py` remains the **Layer 1 Platform Node**, but its registration is handled declaratively in the `blueprint.yaml`.
-
-### Requirement 5: Using NVIDIA OpenShell
+### Requirement 4: Using NVIDIA OpenShell
 *   **Successfully Adopted.** OpenShell orchestrates the Docker containers and kernel-level Landlock/Egress policies.
-
-### Requirement 6: Development in Python
-*   **Solution**: **Layer 1 Proxy** (FastAPI) and **Layer 2 Blueprint Setup** (Python) maintain the Python core of the project.
 
 ---
 
-## 3. Evolutionary Architecture (v4): The Three-Layer Model
-*To achieve the "Zero-Injection" target, we refined the architecture into three specialized layers.*
+## 3. Current Effective Architecture (v5): 100% Blueprint-Driven
+*As of April 2026, the system has achieved full declarative deployment without manual OpenShell command intervention.*
 
 ```mermaid
 flowchart TD
-    subgraph Host [Host Node]
-        subgraph Layer1 [Layer 1: Platform Audit]
+    subgraph Host [Host Node: WSL/EC2]
+        subgraph Layer1 [Layer 1: Security Proxy]
             Gate[gateway.py Security Node]
-            AuditDB[(security_audit.db)]
+            AuditLog[(gateway.log)]
         end
-        subgraph Layer2 [Layer 2: NemoClaw Orchestrator]
-            BP[blueprint.yaml / onboard.py]
-            W_Space[(Host Config Workspace)]
+        subgraph Layer2 [Layer 2: Blueprint Source]
+            BP[blueprint.yaml]
+            PolicyBP[policies/openclaw-sandbox.yaml]
         end
     end
 
-    subgraph Layer3 [Layer 3: OpenShell Runtime]
-        Policy[Policy enforced via Landlock]
-        subgraph SB [Sandbox]
+    subgraph Runtime [Orchestration Runtime]
+        Nemo[NemoClaw Onboarder]
+        OShell[OpenShell Control Plane]
+    end
+
+    subgraph Layer3 [Layer 3: Isolated Sandbox]
+        subgraph SB [Sandbox Pod]
             OC[OpenClaw Agent]
-            MNT[/sandbox/.openclaw - RO Mount/]
+            DNS[DNS Proxy: host.openshell.internal]
         end
     end
 
-    BP -->|Pre-generates| W_Space
-    BP -->|Launch| Layer3
-    W_Space -->|Natively Mounts| MNT
-    OC -.->|Intercepted| Gate
-    Gate -->|Audits| AuditDB
+    BP -->|Source of Truth| Nemo
+    Nemo -->|Registers Provider| OShell
+    Nemo -->|Sets Route| OShell
+    Nemo -->|Provisions| SB
+    
+    OC -.->|inference.local| DNS
+    DNS -.->|Port 8090| Gate
+    Gate -->|Pattern Filter| External[LLM Providers]
 ```
 
-## 4. Current Effective Runtime (As Of 2026-03-31)
+### Key Breakthroughs in v5:
+1.  **Validation Loop Resolution**: By mapping `host.openshell.internal` to `127.0.0.1` on the host side, the `nemoclaw onboard` process can validate the custom security gateway during installation.
+2.  **Mock Success Logic**: `gateway.py` now detects NemoClaw onboarding probes and returns mock success, enabling non-interactive installation without real upstream LLM calls.
+3.  **One-Click Installers**: `install_blueprint_wsl.sh` and `install_blueprint_ec2.sh` automate the entire stack:
+    - Dependencies (Node, Python, NemoClaw)
+    - Gateway Bootstrap
+    - DNS Mapping
+    - Declarative Onboarding
 
-This section clarifies the currently effective control plane in production use.
+---
 
-1. **Sandbox egress entrypoint** is still `inference.local`.
-2. **Actual forward target (`host.openshell.internal:8090`)** is determined by OpenShell provider config:
-   - `openshell provider create ... --config OPENAI_BASE_URL=http://host.openshell.internal:8090/v1`
-   - `openshell inference set --provider guard-gateway --model ...`
-3. **Current `wsl_start.sh` flow does not explicitly set `NEMOCLAW_BLUEPRINT_PATH`**.
-4. Therefore, **project-local `nemoclaw-blueprint/blueprint.yaml` is not automatically the runtime source of truth** unless explicitly synchronized/selected.
+## 4. Operational Workflow
 
-## 5. Blueprint-Driven Target State
+### Installation (Zero-to-Hero)
+Run the platform-specific installer:
+```bash
+./install_blueprint_wsl.sh  # For Windows WSL
+./install_blueprint_ec2.sh  # For AWS EC2
+```
 
-To make blueprint the real source of truth end-to-end:
+### Runtime Path
+1.  **Request**: OpenClaw in sandbox sends model requests to `https://inference.local/v1`.
+2.  **Interception**: OpenShell Egress Policy redirects this to `http://host.openshell.internal:8090/v1`.
+3.  **Audit**: `gateway.py` on the host intercepts the request, checks for dangerous commands (like `rm -rf /`), and logs the audit.
+4.  **Forward**: If safe, the gateway forwards the request to the real provider (OpenRouter/NVIDIA) using API keys from the host's `.env`.
 
-1. Generate artifacts via `src/cli.py onboard`.
-2. Synchronize project `nemoclaw-blueprint/` into NemoClaw runtime blueprint directory before onboarding.
-3. Run `nemoclaw onboard` after synchronization.
-4. Validate that runtime blueprint and project blueprint are identical.
+### Maintenance
+*   **Security Rules**: Modify `src/gateway.py` to add new blocking patterns.
+*   **Network Policies**: Update `nemoclaw-blueprint/policies/openclaw-sandbox.yaml`.
+*   **Artifact Sync**: Use `src/cli.py onboard` to regenerate sandbox configurations when blueprint structure changes.

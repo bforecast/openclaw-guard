@@ -20,13 +20,14 @@ components:
   inference:
     profiles:
       # Default profile: routes all LLM calls through our security gateway (Layer 1)
-      guard:
+      default:
         provider_type: "openai"
         provider_name: "guard-gateway"
         # Points to our host-side FastAPI proxy
         endpoint: "http://host.openshell.internal:8090/v1"
         credential_env: "OPENCLAW_GATEWAY_TOKEN"
         credential_default: "guard-managed"
+        model: "openrouter/stepfun/step-3.5-flash:free"
 
   policy:
     # Points to Layer 3 Policy (defined in policies/ folder)
