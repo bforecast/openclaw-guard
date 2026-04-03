@@ -47,7 +47,7 @@ cd /mnt/d/ag-projects/guard
 
 #### AWS EC2 (Ubuntu 22.04+)
 ```bash
-git clone <your-repo-url> guard
+git clone https://github.com/bforecast/openclaw-guard.git guard
 cd guard
 chmod +x install_blueprint_ec2.sh
 ./install_blueprint_ec2.sh
