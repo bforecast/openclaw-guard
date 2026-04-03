@@ -61,6 +61,7 @@ export NEMOCLAW_PROVIDER="custom"
 export NEMOCLAW_ENDPOINT_URL="http://host.openshell.internal:8090/v1"
 export NEMOCLAW_MODEL="openrouter/stepfun/step-3.5-flash:free"
 export COMPATIBLE_API_KEY="guard-managed"
+export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
 unset NVIDIA_API_KEY # 强制隔离
 
 # 直接运行官方 hosted script
