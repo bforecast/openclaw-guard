@@ -22,10 +22,13 @@ sudo apt-get install -y -q \
 echo "[1/4] Preparing Security Gateway and DNS..."
 
 # 初始化 Python 环境
-if [ ! -d "$PROJECT_DIR/.venv" ]; then
-    python3 -m venv "$PROJECT_DIR/.venv"
-fi
-"$PROJECT_DIR/.venv/bin/pip" install -q -r "$PROJECT_DIR/src/requirements.txt"
+echo "Setting up Python virtual environment..."
+rm -rf "$PROJECT_DIR/.venv"
+python3 -m venv "$PROJECT_DIR/.venv"
+
+# 使用 python -m pip 提高兼容性
+"$PROJECT_DIR/.venv/bin/python" -m pip install -q --upgrade pip
+"$PROJECT_DIR/.venv/bin/python" -m pip install -q -r "$PROJECT_DIR/src/requirements.txt"
 
 # 启动网关
 if [ -f "$PROJECT_DIR/.env" ]; then
