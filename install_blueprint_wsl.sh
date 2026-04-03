@@ -85,6 +85,15 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # 强制将本项目定义的 Blueprint 同步到官方加载路径
 mkdir -p ~/.nemoclaw/source/nemoclaw-blueprint
+
+# 补全缺失的 Presets
+echo "Compiling official policy presets..."
+OFFICIAL_SOURCE="$HOME/.nemoclaw/source"
+if [ -d "$OFFICIAL_SOURCE/nemoclaw-blueprint/policies/presets" ]; then
+    mkdir -p "$PROJECT_DIR/nemoclaw-blueprint/policies/presets"
+    cp -r "$OFFICIAL_SOURCE/nemoclaw-blueprint/policies/presets/"* "$PROJECT_DIR/nemoclaw-blueprint/policies/presets/"
+fi
+
 rsync -a --delete "$PROJECT_DIR/nemoclaw-blueprint/" ~/.nemoclaw/source/nemoclaw-blueprint/
 
 # 重新触发一次 onboard 以激活 Blueprint 特有的挂载与策略
