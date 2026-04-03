@@ -3,7 +3,7 @@ set -e
 
 # 获取项目根目录
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-echo "=== OpenClaw Guard: Official Pattern Wrapper Installer ==="
+echo "=== OpenClaw Guard: EC2 Blueprint Installer (Full Permission Fix) ==="
 echo "Project Path: $PROJECT_DIR"
 
 # ---------------------------------------------------------------------------
@@ -15,20 +15,23 @@ sudo apt-get install -y -q \
   ca-certificates curl git jq lsof psmisc \
   python3 python3-pip python3-venv docker.io
 
-# 确保 Docker 运行并具备权限
+# 确保 Docker 运行
 echo "Starting and enabling Docker..."
 sudo systemctl enable docker >/dev/null 2>&1 || true
 sudo systemctl start docker
+
+# --- 终极权限修复：确保当前会话无需重启即可访问 Docker ---
+echo "Applying immediate Docker socket permission fix..."
+sudo chmod 666 /var/run/docker.sock || true
 if ! groups "$USER" | grep -q '\bdocker\b'; then
     sudo usermod -aG docker "$USER"
-    echo "鉁 Added user to docker group."
 fi
 
 # 等待 Docker 守护进程就绪
 echo "Waiting for Docker socket..."
 for i in {1..10}; do
-    if sudo docker ps > /dev/null 2>&1; then
-        echo "鉁 Docker is ready."
+    if docker ps > /dev/null 2>&1; then
+        echo "鉁 Docker is accessible."
         break
     fi
     sleep 2
@@ -70,7 +73,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "[2/4] Invoking official NVIDIA NemoClaw installer..."
 
-# 导出环境变量，驱动官方脚本自动完成 Onboarding
+# 导出环境变量
 export NEMOCLAW_NON_INTERACTIVE=1
 export NEMOCLAW_PROVIDER="custom"
 export NEMOCLAW_ENDPOINT_URL="http://host.openshell.internal:8090/v1"
@@ -79,10 +82,8 @@ export COMPATIBLE_API_KEY="guard-managed"
 export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
 unset NVIDIA_API_KEY 
 
-# 下载官方脚本并使用 sg docker 运行，以解决权限延迟生效问题
-curl -fsSL https://www.nvidia.com/nemoclaw.sh -o /tmp/nemoclaw_install.sh
-# 即使当前会话没刷新组，sg docker 也能让子进程立刻拥有 docker 权限
-sg docker -c "bash /tmp/nemoclaw_install.sh"
+# 直接执行官方脚本
+curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 
 # ---------------------------------------------------------------------------
 # 3. 同步 Blueprint (Guard Customization)
@@ -93,13 +94,12 @@ rsync -a --delete "$PROJECT_DIR/nemoclaw-blueprint/" ~/.nemoclaw/source/nemoclaw
 
 # 重新触发一次 onboard 以加载我们的 mappings
 export PATH="$HOME/.local/bin:$PATH"
-# 同样使用 sg docker 保证最后的 onboard 命令也能访问 Docker
-sg docker -c "nemoclaw onboard --non-interactive"
+nemoclaw onboard --non-interactive
 
 # ---------------------------------------------------------------------------
 # 4. 完成 (Final Verification)
 # ---------------------------------------------------------------------------
 echo "[4/4] Installation Complete."
-sg docker -c "nemoclaw status"
+nemoclaw status
 echo "--------------------------------"
 echo "To start chatting: nemoclaw my-assistant connect"
