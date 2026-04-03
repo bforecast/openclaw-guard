@@ -7,6 +7,16 @@ echo "=== OpenClaw Guard: Official Pattern Wrapper Installer ==="
 echo "Project Path: $PROJECT_DIR"
 
 # ---------------------------------------------------------------------------
+# 0. 系统基础依赖 (System Dependencies)
+# ---------------------------------------------------------------------------
+echo "[0/4] Checking system dependencies..."
+# 确保在创建 venv 前安装了 python3-venv
+sudo apt-get update -y -q
+sudo apt-get install -y -q \
+  ca-certificates curl git jq lsof psmisc \
+  python3 python3-pip python3-venv
+
+# ---------------------------------------------------------------------------
 # 1. 预备环境：网关与 DNS (Custom Guard Prep)
 # ---------------------------------------------------------------------------
 echo "[1/4] Preparing Security Gateway and DNS..."
