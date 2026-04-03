@@ -10,11 +10,28 @@ echo "Project Path: $PROJECT_DIR"
 # 0. 系统基础依赖 (System Dependencies)
 # ---------------------------------------------------------------------------
 echo "[0/4] Checking system dependencies..."
-# 确保在创建 venv 前安装了 python3-venv
 sudo apt-get update -y -q
 sudo apt-get install -y -q \
   ca-certificates curl git jq lsof psmisc \
   python3 python3-pip python3-venv docker.io
+
+# 确保 Docker 运行并具备权限
+echo "Starting and enabling Docker..."
+sudo systemctl enable docker >/dev/null 2>&1 || true
+sudo systemctl start docker
+if ! groups "$USER" | grep -q '\bdocker\b'; then
+    sudo usermod -aG docker "$USER"
+fi
+
+# 等待 Docker 守护进程就绪
+echo "Waiting for Docker socket..."
+for i in {1..10}; do
+    if sudo docker ps > /dev/null 2>&1; then
+        echo "鉁 Docker is ready."
+        break
+    fi
+    sleep 2
+done
 
 # ---------------------------------------------------------------------------
 # 1. 预备环境：网关与 DNS (Custom Guard Prep)
@@ -79,7 +96,8 @@ rsync -a --delete "$PROJECT_DIR/nemoclaw-blueprint/" ~/.nemoclaw/source/nemoclaw
 
 # 重新触发一次 onboard 以确保 Blueprint 中的额外配置（如 mappings）被加载
 export PATH="$HOME/.local/bin:$PATH"
-nemoclaw onboard --non-interactive
+# 使用 sudo -E 保证 Docker 权限并保留环境变量
+sudo -E env "PATH=$PATH" "$HOME/.local/bin/nemoclaw" onboard --non-interactive
 
 # ---------------------------------------------------------------------------
 # 4. 完成 (Final Verification)
