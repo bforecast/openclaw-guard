@@ -22,6 +22,7 @@ fi
 # 自动安装 NemoClaw (它会自动补全 openshell)
 if ! command -v nemoclaw >/dev/null 2>&1; then
     echo "[0/3] Installing NemoClaw CLI..."
+    # nvm/user-land npm 环境不需要 sudo
     npm install -g git+https://github.com/NVIDIA/NemoClaw.git
 fi
 

@@ -39,7 +39,8 @@ fi
 # 0.4 安装 NemoClaw (会自动补全 openshell)
 if ! command -v nemoclaw >/dev/null 2>&1; then
     echo "Installing NemoClaw CLI via npm..."
-    sudo npm install -g git+https://github.com/NVIDIA/NemoClaw.git || npm install -g git+https://github.com/NVIDIA/NemoClaw.git
+    # nvm 环境下全局安装不需要 sudo，直接执行即可
+    npm install -g git+https://github.com/NVIDIA/NemoClaw.git
 fi
 
 # 0.5 初始化网关 Python 环境
