@@ -19,11 +19,19 @@ if ! command -v node >/dev/null 2>&1; then
     nvm use 22
 fi
 
-# 自动安装 NemoClaw (它会自动补全 openshell)
+# 自动安装 NemoClaw (编译安装)
 if ! command -v nemoclaw >/dev/null 2>&1; then
-    echo "[0/3] Installing NemoClaw CLI..."
-    # nvm/user-land npm 环境不需要 sudo
-    npm install -g git+https://github.com/NVIDIA/NemoClaw.git
+    echo "[0/3] Installing NemoClaw CLI from source..."
+    TEMP_DIR=$(mktemp -d)
+    git clone --depth 1 https://github.com/NVIDIA/NemoClaw.git "$TEMP_DIR"
+    cd "$TEMP_DIR"
+    npm install --ignore-scripts
+    npm run build:cli || npx tsc -p tsconfig.src.json
+    cd nemoclaw && npm install --ignore-scripts && npm run build
+    cd ..
+    npm link
+    cd "$PROJECT_DIR"
+    rm -rf "$TEMP_DIR"
 fi
 
 # 初始化 Python 虚拟环境
