@@ -49,6 +49,8 @@ cd /mnt/d/ag-projects/guard
 ```bash
 git clone https://github.com/bforecast/openclaw-guard.git guard
 cd guard
+cp .env.example .env
+nano .env  # 在此输入您的 API Key
 chmod +x install_blueprint_ec2.sh
 ./install_blueprint_ec2.sh
 ```
