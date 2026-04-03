@@ -36,11 +36,12 @@ if ! command -v nemoclaw >/dev/null 2>&1 || [ $NEMOCLAW_BROKEN -eq 1 ]; then
     git clone --depth 1 https://github.com/NVIDIA/NemoClaw.git "$TEMP_DIR"
     cd "$TEMP_DIR"
     
-    npm install --omit=dev --ignore-scripts
-    npm run build:cli || npx tsc -p tsconfig.src.json
+    npm install --ignore-scripts
+    echo "Compiling CLI..."
+    npm run build:cli
     
     cd nemoclaw
-    npm install --omit=dev --ignore-scripts
+    npm install --ignore-scripts
     npm run build
     cd ..
     

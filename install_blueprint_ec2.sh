@@ -56,11 +56,15 @@ if ! command -v nemoclaw >/dev/null 2>&1 || [ $NEMOCLAW_BROKEN -eq 1 ]; then
     cd "$TEMP_DIR"
     
     echo "Building NemoClaw (this may take 30-60s)..."
-    npm install --omit=dev --ignore-scripts
-    npm run build:cli || npx tsc -p tsconfig.src.json
+    # We need devDependencies (like typescript) to build from source
+    npm install --ignore-scripts
     
+    echo "Compiling CLI..."
+    npm run build:cli
+    
+    echo "Compiling Plugin..."
     cd nemoclaw
-    npm install --omit=dev --ignore-scripts
+    npm install --ignore-scripts
     npm run build
     cd ..
     
