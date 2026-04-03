@@ -9,7 +9,7 @@ echo "Project Path: $PROJECT_DIR"
 # ---------------------------------------------------------------------------
 # 0. 系统基础依赖 (System Dependencies)
 # ---------------------------------------------------------------------------
-echo "[0/4] Checking system dependencies..."
+echo "[0/5] Checking system dependencies..."
 sudo apt-get update -y -q
 sudo apt-get install -y -q \
   ca-certificates curl git jq lsof psmisc \
@@ -31,7 +31,7 @@ echo "鉁 Docker is ready and accessible."
 # ---------------------------------------------------------------------------
 # 1. 预备环境：网关与 DNS (Custom Guard Prep)
 # ---------------------------------------------------------------------------
-echo "[1/4] Preparing Security Gateway and DNS..."
+echo "[1/5] Preparing Python Environment..."
 
 # 初始化 Python 环境
 echo "Setting up Python virtual environment..."
@@ -40,13 +40,33 @@ python3 -m venv "$PROJECT_DIR/.venv"
 "$PROJECT_DIR/.venv/bin/python" -m pip install -q --upgrade pip
 "$PROJECT_DIR/.venv/bin/python" -m pip install -q -r "$PROJECT_DIR/src/requirements.txt"
 
-# 启动网关
+# ---------------------------------------------------------------------------
+# 1b. 交互式模型选择 (Model Setup Wizard)
+# ---------------------------------------------------------------------------
+echo "[1b/5] Running Model Setup Wizard..."
 if [ -f "$PROJECT_DIR/.env" ]; then
-    export $(grep -v '^#' "$PROJECT_DIR/.env" | xargs)
+    # 加载 .env 供 setup.py 读取（仅在当前子 shell）
+    set -a && source "$PROJECT_DIR/.env" && set +a
 fi
+"$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/setup.py" --project-dir "$PROJECT_DIR"
+
+# 重新加载 .env（setup.py 可能已写入 MODEL_ID）
+if [ -f "$PROJECT_DIR/.env" ]; then
+    set -a && source "$PROJECT_DIR/.env" && set +a
+fi
+
+# ---------------------------------------------------------------------------
+# 2. 启动网关 (Start Security Gateway)
+# ---------------------------------------------------------------------------
+echo "[2/5] Starting Security Gateway..."
 lsof -t -i :8090 | xargs kill -9 2>/dev/null || true
 mkdir -p "$PROJECT_DIR/logs"
-nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+if [ -f "$PROJECT_DIR/.env" ]; then
+    env $(grep -v '^#' "$PROJECT_DIR/.env" | xargs) \
+        nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+else
+    nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+fi
 
 # 等待网关就绪
 for i in {1..15}; do
@@ -60,26 +80,26 @@ if ! grep -q "host.openshell.internal" /etc/hosts; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. 调用官方安装程序 (Official Engine Setup)
+# 3. 调用官方安装程序 (Official Engine Setup)
 # ---------------------------------------------------------------------------
-echo "[2/4] Invoking official NVIDIA NemoClaw installer..."
+echo "[3/5] Invoking official NVIDIA NemoClaw installer..."
 
-# 导出环境变量
+# 导出 NemoClaw 环境变量（使用 setup.py 选择的模型）
 export NEMOCLAW_NON_INTERACTIVE=1
 export NEMOCLAW_PROVIDER="custom"
 export NEMOCLAW_ENDPOINT_URL="http://host.openshell.internal:8090/v1"
-export NEMOCLAW_MODEL="openrouter/stepfun/step-3.5-flash:free"
+export NEMOCLAW_MODEL="${MODEL_ID:-openrouter/stepfun/step-3.5-flash:free}"
 export COMPATIBLE_API_KEY="guard-managed"
 export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
-unset NVIDIA_API_KEY 
+unset NVIDIA_API_KEY
 
 # 直接执行官方脚本
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 
 # ---------------------------------------------------------------------------
-# 3. 同步 Blueprint (Guard Customization)
+# 4. 同步 Blueprint (Guard Customization)
 # ---------------------------------------------------------------------------
-echo "[3/4] Synchronizing Guard Blueprint..."
+echo "[4/5] Synchronizing Guard Blueprint..."
 
 # 确保加载 nvm 环境
 export NVM_DIR="$HOME/.nvm"
@@ -103,7 +123,7 @@ rsync -a --delete "$PROJECT_DIR/nemoclaw-blueprint/" ~/.nemoclaw/source/nemoclaw
 nemoclaw onboard --non-interactive
 
 # ---------------------------------------------------------------------------
-# 4. 持久化环境变量 (Step 4: Persistence)
+# 5. 持久化环境变量 (Persistence)
 # ---------------------------------------------------------------------------
 if ! grep -q "NemoClaw PATH setup" "$HOME/.bashrc"; then
     echo "" >> "$HOME/.bashrc"
