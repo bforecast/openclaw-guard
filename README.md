@@ -1,11 +1,12 @@
 # OpenClaw Guard
 
-OpenClaw Guard 是一个基于 **NVIDIA OpenShell** 和 **NemoClaw** 的安全网关项目。它实现了 **100% Blueprint 驱动** 的架构，将 OpenClaw 的模型请求统一接入主机侧审查网关（FastAPI），在执行输入/输出安全检查后再转发到 OpenRouter / OpenAI / Anthropic 等上游。
+OpenClaw Guard 是一个基于 **NVIDIA OpenShell** 和 **NemoClaw** 的安全网关项目。它实现了 **100% Blueprint 驱动** 的架构，采用 **官方原生包装器 (Official Wrapper)** 模式，将 OpenClaw 的模型请求统一接入主机侧审查网关（FastAPI）。
 
 核心目标：
 - **声明式部署**：利用 NemoClaw Blueprint 实现一键式、零干预环境搭建。
+- **极致兼容**：直接调用 NVIDIA 官方安装脚本，确保 100% 兼容最新的依赖与构建逻辑。
+- **自动持久化**：安装脚本自动配置环境变量与 Docker 权限，实现“安装即用”。
 - **安全审计**：所有模型请求通过统一入口，实时拦截危险命令（如 `rm -rf`）。
-- **透明劫持**：保持与 OpenShell 的 `inference.local` 路由兼容，对沙箱内 Agent 透明。
 
 ## 架构概览 (v5: 100% Blueprint-Driven)
 

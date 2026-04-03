@@ -95,15 +95,30 @@ flowchart TD
 ### Key Breakthroughs in v5:
 1.  **Validation Loop Resolution**: By mapping `host.openshell.internal` to `127.0.0.1` on the host side, the `nemoclaw onboard` process can validate the custom security gateway during installation.
 2.  **Mock Success Logic**: `gateway.py` now detects NemoClaw onboarding probes and returns mock success, enabling non-interactive installation without real upstream LLM calls.
-3.  **One-Click Installers**: `install_blueprint_wsl.sh` and `install_blueprint_ec2.sh` automate the entire stack:
-    - Dependencies (Node, Python, NemoClaw)
-    - Gateway Bootstrap
-    - DNS Mapping
-    - Declarative Onboarding
+3.  **Official Wrapper Pattern**: Scripts now invoke the official `nvidia.com/nemoclaw.sh` to ensure 100% compatibility with NVIDIA's evolving build and dependency logic.
+4.  **Immediate Docker Access**: A mandatory `sudo chmod 666 /var/run/docker.sock` bypasses the "session restart lag" common in cloud VM (EC2) deployments.
+5.  **Environment Persistence**: Installer automatically updates `~/.bashrc` with required `PATH` and `nvm` exports for permanent command availability.
+6.  **One-Click Installers**: `install_blueprint_wsl.sh` and `install_blueprint_ec2.sh` automate the entire stack.
 
 ---
 
-## 4. Operational Workflow
+## 5. Blueprint Loading Mechanism: The "Global Sync" Strategy
+
+To ensure NemoClaw consumes the project-specific blueprint without requiring complex CLI path injections, the system employs a **Global Source Synchronization** mechanism.
+
+### The Mechanism
+NemoClaw's onboarding engine uses a prioritized search path for blueprints. The primary authoritative location is the user's global configuration directory: `~/.nemoclaw/source/nemoclaw-blueprint/`.
+
+### Implementation Steps
+1.  **Authoritative Synchronization**: The installation scripts use `rsync -a --delete` to mirror the project's `./nemoclaw-blueprint/` folder into the global search path.
+2.  **Implicit Loading**: When `nemoclaw onboard` is executed, it automatically discovers and loads the `blueprint.yaml` from this synchronized global location.
+3.  **Cross-Layer Binding**: Since the blueprint defines relative mappings (e.g., `sandbox_workspace/openclaw`), and the command is executed from the project root, NemoClaw successfully binds the host-side configuration (Layer 2) to the sandbox runtime (Layer 3).
+
+This strategy guarantees that the **Source of Truth** always resides within the version-controlled repository while remaining perfectly compatible with NemoClaw's standardized deployment lifecycle.
+
+---
+
+## 6. Operational Workflow
 
 ### Installation (Zero-to-Hero)
 Run the platform-specific installer:
