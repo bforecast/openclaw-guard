@@ -71,7 +71,31 @@ MODEL_ROUTES = [
     (r"^(nvidia/|meta/|mistralai/|google/|microsoft/)", "nvidia"),
 ]
 
-DEFAULT_PROVIDER = "openrouter"
+DEFAULT_MODEL = os.environ.get("MODEL_ID", "openrouter/stepfun/step-3.5-flash:free")
+
+
+def _infer_default_provider(model_id: str) -> str:
+    """Derive the default provider from MODEL_ID using MODEL_ROUTES."""
+    for pattern, provider_name in MODEL_ROUTES:
+        if re.match(pattern, model_id, re.IGNORECASE):
+            return provider_name
+    if "/" in model_id:
+        return "openrouter"
+    return "openrouter"
+
+
+# Prefer explicit PROVIDER_ID from .env; fall back to inference for backward compat
+_explicit_provider = os.environ.get("PROVIDER_ID", "")
+if _explicit_provider and _explicit_provider in PROVIDERS:
+    DEFAULT_PROVIDER = _explicit_provider
+elif _explicit_provider:
+    logging.warning(
+        "PROVIDER_ID=%s is not a recognized provider; falling back to inference from MODEL_ID.",
+        _explicit_provider,
+    )
+    DEFAULT_PROVIDER = _infer_default_provider(DEFAULT_MODEL)
+else:
+    DEFAULT_PROVIDER = _infer_default_provider(DEFAULT_MODEL)
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -468,7 +492,12 @@ async def health():
         name: bool(os.environ.get(cfg["api_key_env"]))
         for name, cfg in PROVIDERS.items()
     }
-    return {"status": "ok", "providers": available, "default": DEFAULT_PROVIDER}
+    return {
+        "status": "ok",
+        "providers": available,
+        "default_provider": DEFAULT_PROVIDER,
+        "default_model": DEFAULT_MODEL,
+    }
 
 
 @app.get("/v1/models")
@@ -508,7 +537,7 @@ async def list_models():
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     body = await request.json()
-    model = body.get("model", "unknown")
+    model = body.get("model") or DEFAULT_MODEL
     messages = body.get("messages", [])
     
     # [BYPASS] Mock NemoClaw probe
@@ -618,7 +647,7 @@ async def responses(request: Request):
         })
 
     # [BYPASS] Inject low max_tokens to bypass OpenRouter 16k token reserve (402)
-    model = body.get("model", "unknown")
+    model = body.get("model") or DEFAULT_MODEL
     provider_name, provider_cfg, cleaned_model = resolve_provider(model)
     if provider_name == "openrouter" and "max_tokens" not in body:
         log.info("Injecting default max_tokens: 1024 for OpenRouter compatibility.")
