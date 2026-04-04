@@ -59,14 +59,13 @@ fi
 # 2. 启动网关 (Start Security Gateway)
 # ---------------------------------------------------------------------------
 echo "[2/5] Starting Security Gateway..."
+# 全局导出 .env（gateway.py 和后续 nemoclaw 步骤都依赖这些变量）
+if [ -f "$PROJECT_DIR/.env" ]; then
+    export $(grep -v '^#' "$PROJECT_DIR/.env" | xargs)
+fi
 lsof -t -i :8090 | xargs kill -9 2>/dev/null || true
 mkdir -p "$PROJECT_DIR/logs"
-if [ -f "$PROJECT_DIR/.env" ]; then
-    env $(grep -v '^#' "$PROJECT_DIR/.env" | xargs) \
-        nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
-else
-    nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
-fi
+nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
 
 # 等待网关就绪
 for i in {1..15}; do
@@ -96,23 +95,10 @@ unset NVIDIA_API_KEY
 # 直接执行官方脚本
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 
-# 刷新 PATH — nemoclaw 通过 npm 安装到 nvm 的 node bin 目录
+# 确保加载 nvm 环境（与昨天正常工作的版本一致）
 export NVM_DIR="$HOME/.nvm"
-# 找到实际的 node bin 目录（nvm.sh 在 set -e 下不可靠）
-NODE_BIN=$(find "$HOME/.nvm/versions/node" -maxdepth 2 -name bin -type d 2>/dev/null | sort -V | tail -1)
-if [ -n "$NODE_BIN" ]; then
-    export PATH="$NODE_BIN:$HOME/.local/bin:$PATH"
-else
-    export PATH="$HOME/.local/bin:$PATH"
-fi
-
-if ! command -v nemoclaw >/dev/null 2>&1; then
-    echo "ERROR: nemoclaw not found after installation."
-    echo "  node bin: ${NODE_BIN:-not found}"
-    echo "  ls node bin: $(ls "$NODE_BIN"/nemoclaw 2>/dev/null || echo 'missing')"
-    exit 1
-fi
-echo "✔ nemoclaw found: $(which nemoclaw)"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+export PATH="$HOME/.local/bin:$PATH"
 
 # ---------------------------------------------------------------------------
 # 4. 同步 Blueprint (Guard Customization)
