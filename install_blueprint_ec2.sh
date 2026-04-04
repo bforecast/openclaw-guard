@@ -48,7 +48,7 @@ if [ -f "$PROJECT_DIR/.env" ]; then
     # 加载 .env 供 setup.py 读取（仅在当前子 shell）
     set -a && source "$PROJECT_DIR/.env" && set +a
 fi
-"$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/setup.py" --project-dir "$PROJECT_DIR"
+"$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/setup.py" --non-interactive --project-dir "$PROJECT_DIR"
 
 # 重新加载 .env（setup.py 可能已写入 MODEL_ID）
 if [ -f "$PROJECT_DIR/.env" ]; then
@@ -59,13 +59,14 @@ fi
 # 2. 启动网关 (Start Security Gateway)
 # ---------------------------------------------------------------------------
 echo "[2/5] Starting Security Gateway..."
-# 全局导出 .env（gateway.py 和后续 nemoclaw 步骤都依赖这些变量）
-if [ -f "$PROJECT_DIR/.env" ]; then
-    export $(grep -v '^#' "$PROJECT_DIR/.env" | xargs)
-fi
 lsof -t -i :8090 | xargs kill -9 2>/dev/null || true
 mkdir -p "$PROJECT_DIR/logs"
-nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+if [ -f "$PROJECT_DIR/.env" ]; then
+    env $(grep -v '^#' "$PROJECT_DIR/.env" | xargs) \
+        nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+else
+    nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+fi
 
 # 等待网关就绪
 for i in {1..15}; do
@@ -92,14 +93,36 @@ export COMPATIBLE_API_KEY="guard-managed"
 export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
 unset NVIDIA_API_KEY
 
-# 直接执行官方脚本
-curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
+# 绕过官方 bootstrap 包装器（nemoclaw.sh）的 bug：
+# bootstrap 将仓库 clone 到临时目录，install.sh 检测到本地 package.json
+# 后走 "from source" 路径（npm link 指向临时目录），但 bootstrap 退出时
+# trap 'rm -rf tmpdir' 删除了该目录，导致所有符号链接断裂。
+#
+# 修复：自己 clone 到持久目录，直接运行 scripts/install.sh。
+# resolve_repo_root() 检测到 $NEMOCLAW_SRC/package.json → 走 "from source"
+# 路径，npm link 指向持久目录，不会被清理。
+NEMOCLAW_SRC="$HOME/.nemoclaw/source"
+if [ ! -f "$NEMOCLAW_SRC/package.json" ]; then
+    echo "Cloning NemoClaw to persistent source directory..."
+    rm -rf "$NEMOCLAW_SRC"
+    git clone --depth 1 https://github.com/NVIDIA/NemoClaw.git "$NEMOCLAW_SRC"
+fi
 
-# 确保加载 nvm 环境（与昨天正常工作的版本一致）
+# 从持久源码目录运行官方安装器（跳过 bootstrap 包装器）
+bash "$NEMOCLAW_SRC/scripts/install.sh"
+
+# 确保加载 nvm 环境
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 export PATH="$HOME/.local/bin:$PATH"
 
+# 验证 nemoclaw 命令可用
+if ! command -v nemoclaw &>/dev/null; then
+    echo "ERROR: nemoclaw CLI is not available after installation."
+    echo "       Check npm link output and PATH settings."
+    exit 1
+fi
+echo "✓ nemoclaw CLI verified: $(nemoclaw --version 2>/dev/null || echo 'ok')"
 # ---------------------------------------------------------------------------
 # 4. 同步 Blueprint (Guard Customization)
 # ---------------------------------------------------------------------------
