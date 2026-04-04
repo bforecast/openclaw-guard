@@ -98,14 +98,18 @@ curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 
 # 刷新 PATH — nemoclaw 通过 npm 安装到 nvm 的 node bin 目录
 export NVM_DIR="$HOME/.nvm"
-if [ -s "$NVM_DIR/nvm.sh" ]; then
-    set +e; \. "$NVM_DIR/nvm.sh"; set -e
+# 找到实际的 node bin 目录（nvm.sh 在 set -e 下不可靠）
+NODE_BIN=$(find "$HOME/.nvm/versions/node" -maxdepth 2 -name bin -type d 2>/dev/null | sort -V | tail -1)
+if [ -n "$NODE_BIN" ]; then
+    export PATH="$NODE_BIN:$HOME/.local/bin:$PATH"
+else
+    export PATH="$HOME/.local/bin:$PATH"
 fi
-export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/$(node -v 2>/dev/null || echo v22)/bin:$PATH"
 
 if ! command -v nemoclaw >/dev/null 2>&1; then
-    echo "ERROR: nemoclaw not found after installation. Check PATH."
-    echo "  Searched: $(echo $PATH | tr ':' '\n' | head -5)"
+    echo "ERROR: nemoclaw not found after installation."
+    echo "  node bin: ${NODE_BIN:-not found}"
+    echo "  ls node bin: $(ls "$NODE_BIN"/nemoclaw 2>/dev/null || echo 'missing')"
     exit 1
 fi
 echo "✔ nemoclaw found: $(which nemoclaw)"
