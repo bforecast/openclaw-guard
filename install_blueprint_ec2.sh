@@ -9,7 +9,7 @@ echo "Project Path: $PROJECT_DIR"
 # ---------------------------------------------------------------------------
 # 0. 系统基础依赖 (System Dependencies)
 # ---------------------------------------------------------------------------
-echo "[0/5] Checking system dependencies..."
+echo "[0/4] Checking system dependencies..."
 sudo apt-get update -y -q
 sudo apt-get install -y -q \
   ca-certificates curl git jq lsof psmisc \
@@ -31,7 +31,7 @@ echo "鉁 Docker is ready and accessible."
 # ---------------------------------------------------------------------------
 # 1. 预备环境：网关与 DNS (Custom Guard Prep)
 # ---------------------------------------------------------------------------
-echo "[1/5] Preparing Python Environment..."
+echo "[1/4] Preparing Python Environment..."
 
 # 初始化 Python 环境
 echo "Setting up Python virtual environment..."
@@ -43,7 +43,7 @@ python3 -m venv "$PROJECT_DIR/.venv"
 # ---------------------------------------------------------------------------
 # 1b. 交互式模型选择 (Model Setup Wizard)
 # ---------------------------------------------------------------------------
-echo "[1b/5] Running Model Setup Wizard..."
+echo "[1b/4] Running Model Setup Wizard..."
 if [ -f "$PROJECT_DIR/.env" ]; then
     # 加载 .env 供 setup.py 读取（仅在当前子 shell）
     set -a && source "$PROJECT_DIR/.env" && set +a
@@ -58,7 +58,7 @@ fi
 # ---------------------------------------------------------------------------
 # 2. 启动网关 (Start Security Gateway)
 # ---------------------------------------------------------------------------
-echo "[2/5] Starting Security Gateway..."
+echo "[2/4] Starting Security Gateway..."
 lsof -t -i :8090 | xargs kill -9 2>/dev/null || true
 mkdir -p "$PROJECT_DIR/logs"
 if [ -f "$PROJECT_DIR/.env" ]; then
@@ -82,7 +82,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3. 调用官方安装程序 (Official Engine Setup)
 # ---------------------------------------------------------------------------
-echo "[3/5] Invoking official NVIDIA NemoClaw installer..."
+echo "[3/4] Invoking official NVIDIA NemoClaw installer..."
 
 # 导出 NemoClaw 环境变量（使用 setup.py 选择的模型）
 export NEMOCLAW_NON_INTERACTIVE=1
@@ -103,10 +103,22 @@ unset NVIDIA_API_KEY
 # 路径，npm link 指向持久目录，不会被清理。
 NEMOCLAW_SRC="$HOME/.nemoclaw/source"
 if [ ! -f "$NEMOCLAW_SRC/package.json" ]; then
-    echo "Cloning NemoClaw to persistent source directory..."
+    echo "Downloading NemoClaw source..."
     rm -rf "$NEMOCLAW_SRC"
-    git clone --depth 1 https://github.com/NVIDIA/NemoClaw.git "$NEMOCLAW_SRC"
+    mkdir -p "$NEMOCLAW_SRC"
+    curl -fsSL https://github.com/NVIDIA/NemoClaw/archive/refs/heads/main.tar.gz \
+        | tar xz --strip-components=1 -C "$NEMOCLAW_SRC"
 fi
+
+# 在 install.sh 运行前，先把我们的自定义 Blueprint 合入源码树
+# 这样第一次 onboard 就直接使用，省掉二次 onboard
+echo "[3b/4] Pre-merging Guard Blueprint into source tree..."
+OFFICIAL_PRESETS="$NEMOCLAW_SRC/nemoclaw-blueprint/policies/presets"
+if [ -d "$OFFICIAL_PRESETS" ]; then
+    mkdir -p "$PROJECT_DIR/nemoclaw-blueprint/policies/presets"
+    cp -rn "$OFFICIAL_PRESETS/"* "$PROJECT_DIR/nemoclaw-blueprint/policies/presets/" 2>/dev/null || true
+fi
+rsync -a --delete "$PROJECT_DIR/nemoclaw-blueprint/" "$NEMOCLAW_SRC/nemoclaw-blueprint/"
 
 # 从持久源码目录运行官方安装器（跳过 bootstrap 包装器）
 bash "$NEMOCLAW_SRC/scripts/install.sh"
@@ -123,29 +135,9 @@ if ! command -v nemoclaw &>/dev/null; then
     exit 1
 fi
 echo "✓ nemoclaw CLI verified: $(nemoclaw --version 2>/dev/null || echo 'ok')"
-# ---------------------------------------------------------------------------
-# 4. 同步 Blueprint (Guard Customization)
-# ---------------------------------------------------------------------------
-echo "[4/5] Synchronizing Guard Blueprint..."
-
-# 同步项目 Blueprint
-mkdir -p ~/.nemoclaw/source/nemoclaw-blueprint
-
-# 补全缺失的 Presets
-echo "Compiling official policy presets..."
-OFFICIAL_SOURCE="$HOME/.nemoclaw/source"
-if [ -d "$OFFICIAL_SOURCE/nemoclaw-blueprint/policies/presets" ]; then
-    mkdir -p "$PROJECT_DIR/nemoclaw-blueprint/policies/presets"
-    cp -r "$OFFICIAL_SOURCE/nemoclaw-blueprint/policies/presets/"* "$PROJECT_DIR/nemoclaw-blueprint/policies/presets/"
-fi
-
-rsync -a --delete "$PROJECT_DIR/nemoclaw-blueprint/" ~/.nemoclaw/source/nemoclaw-blueprint/
-
-# 重新触发一次 onboard
-nemoclaw onboard --non-interactive
 
 # ---------------------------------------------------------------------------
-# 5. 持久化环境变量 (Persistence)
+# 4. 持久化环境变量 (Persistence)
 # ---------------------------------------------------------------------------
 if ! grep -q "NemoClaw PATH setup" "$HOME/.bashrc"; then
     echo "" >> "$HOME/.bashrc"
