@@ -99,6 +99,45 @@ flowchart TD
 4.  **Immediate Docker Access**: A mandatory `sudo chmod 666 /var/run/docker.sock` bypasses the "session restart lag" common in cloud VM (EC2) deployments.
 5.  **Environment Persistence**: Installer automatically updates `~/.bashrc` with required `PATH` and `nvm` exports for permanent command availability.
 6.  **One-Click Installers**: `install_blueprint_wsl.sh` and `install_blueprint_ec2.sh` automate the entire stack.
+7.  **Interactive Model Setup (`setup.py`)**: Before gateway/NemoClaw start, a setup wizard reads `.env`, tests real API connectivity for each configured provider, and lets the user choose a default model. The choice is written into both `blueprint.yaml` and `.env` (`MODEL_ID`), ensuring the full stack (gateway → NemoClaw → sandbox) uses the user's preferred model from the first boot.
+
+---
+
+## 4b. Model Setup Wizard (`src/setup.py`)
+
+The setup wizard bridges the gap between `.env` key configuration and the runtime model selection that was previously hardcoded.
+
+### Problem
+Previously, `NEMOCLAW_MODEL` was hardcoded to `openrouter/stepfun/step-3.5-flash:free` in install scripts. Users who configured `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` still got the OpenRouter free model by default, with no way to choose during installation.
+
+### Solution Architecture
+```
+.env (API keys) ──► setup.py ──► Tests connectivity per provider
+                                   │
+                                   ├──► Presents numbered model menu
+                                   │      (only reachable providers shown)
+                                   │
+                                   ├──► Writes MODEL_ID to .env
+                                   └──► Patches blueprint.yaml
+                                          (inference.profiles.default.model)
+```
+
+### Execution Flow in `install_blueprint_ec2.sh`
+```
+Step 0: System dependencies
+Step 1: Python venv + pip install
+Step 1b: setup.py (reads .env, tests APIs, user picks model)  ◄── NEW
+Step 2: Start gateway.py (with MODEL_ID from setup.py)
+Step 3: NemoClaw install (NEMOCLAW_MODEL = $MODEL_ID)
+Step 4: Sync blueprint (already patched by setup.py)
+Step 5: Persist PATH to ~/.bashrc
+```
+
+### Key Design Decisions
+- **Runs before gateway**: setup.py tests upstream providers directly (not via the local gateway) so it works on a fresh install.
+- **Writes both .env and blueprint.yaml**: `.env` is consumed by gateway.py and start scripts; `blueprint.yaml` is consumed by NemoClaw onboard.
+- **`--non-interactive` flag**: For CI/automation, auto-selects the first reachable model.
+- **No new dependencies**: Uses `httpx` and `pyyaml` already in `requirements.txt`.
 
 ---
 
@@ -126,6 +165,7 @@ Run the platform-specific installer:
 ./install_blueprint_wsl.sh  # For Windows WSL
 ./install_blueprint_ec2.sh  # For AWS EC2
 ```
+During installation, the **Model Setup Wizard** (`src/setup.py`) will automatically detect configured API keys, test upstream connectivity, and prompt you to choose a default model. In non-interactive mode (CI), the first reachable model is auto-selected.
 
 ### Runtime Path
 1.  **Request**: OpenClaw in sandbox sends model requests to `https://inference.local/v1`.

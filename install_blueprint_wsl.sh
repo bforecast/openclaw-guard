@@ -40,13 +40,15 @@ python3 -m venv "$PROJECT_DIR/.venv"
 "$PROJECT_DIR/.venv/bin/python" -m pip install -q --upgrade pip
 "$PROJECT_DIR/.venv/bin/python" -m pip install -q -r "$PROJECT_DIR/src/requirements.txt"
 
-# 启动网关
-if [ -f "$PROJECT_DIR/.env" ]; then
-    export $(grep -v '^#' "$PROJECT_DIR/.env" | xargs)
-fi
+# 启动网关 — 仅将 .env 变量注入 gateway 进程，不污染全局 shell 环境
 lsof -t -i :8090 | xargs kill -9 2>/dev/null || true
 mkdir -p "$PROJECT_DIR/logs"
-nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+if [ -f "$PROJECT_DIR/.env" ]; then
+    env $(grep -v '^#' "$PROJECT_DIR/.env" | xargs) \
+        nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+else
+    nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+fi
 
 # 等待网关就绪
 for i in {1..15}; do
