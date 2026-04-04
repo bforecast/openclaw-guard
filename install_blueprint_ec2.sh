@@ -123,7 +123,6 @@ if ! command -v nemoclaw &>/dev/null; then
     exit 1
 fi
 echo "✓ nemoclaw CLI verified: $(nemoclaw --version 2>/dev/null || echo 'ok')"
-
 # ---------------------------------------------------------------------------
 # 4. 同步 Blueprint (Guard Customization)
 # ---------------------------------------------------------------------------
