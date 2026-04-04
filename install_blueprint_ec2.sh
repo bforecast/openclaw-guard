@@ -96,15 +96,19 @@ unset NVIDIA_API_KEY
 # 直接执行官方脚本
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 
-# 刷新 PATH（nemoclaw 安装到 ~/.local/bin，nvm/node 安装到 ~/.nvm）
+# 刷新 PATH — nemoclaw 通过 npm 安装到 nvm 的 node bin 目录
 export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-export PATH="$HOME/.local/bin:$PATH"
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+    set +e; \. "$NVM_DIR/nvm.sh"; set -e
+fi
+export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/$(node -v 2>/dev/null || echo v22)/bin:$PATH"
 
 if ! command -v nemoclaw >/dev/null 2>&1; then
     echo "ERROR: nemoclaw not found after installation. Check PATH."
+    echo "  Searched: $(echo $PATH | tr ':' '\n' | head -5)"
     exit 1
 fi
+echo "✔ nemoclaw found: $(which nemoclaw)"
 
 # ---------------------------------------------------------------------------
 # 4. 同步 Blueprint (Guard Customization)
