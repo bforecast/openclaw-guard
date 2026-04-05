@@ -95,11 +95,14 @@ flowchart TD
 ### Key Breakthroughs in v5:
 1.  **Validation Loop Resolution**: By mapping `host.openshell.internal` to `127.0.0.1` on the host side, the `nemoclaw onboard` process can validate the custom security gateway during installation.
 2.  **Mock Success Logic**: `gateway.py` now detects NemoClaw onboarding probes and returns mock success, enabling non-interactive installation without real upstream LLM calls.
-3.  **Official Wrapper Pattern**: Scripts now invoke the official `nvidia.com/nemoclaw.sh` to ensure 100% compatibility with NVIDIA's evolving build and dependency logic.
+3.  **Persistent Source Pattern**: Scripts bypass the official `nemoclaw.sh` bootstrap (which has a `trap rm -rf` bug that breaks npm symlinks) and instead download the NemoClaw source tarball to a persistent directory `~/.nemoclaw/source/`, then run `scripts/install.sh` directly. `NEMOCLAW_REPO_ROOT` is exported to force `is_source_checkout()` → Path A (from source), preventing `install.sh` from re-cloning and overwriting our customizations.
 4.  **Immediate Docker Access**: A mandatory `sudo chmod 666 /var/run/docker.sock` bypasses the "session restart lag" common in cloud VM (EC2) deployments.
 5.  **Environment Persistence**: Installer automatically updates `~/.bashrc` with required `PATH` and `nvm` exports for permanent command availability.
 6.  **One-Click Installers**: `install_blueprint_wsl.sh` and `install_blueprint_ec2.sh` automate the entire stack.
-7.  **Interactive Model Setup (`setup.py`)**: Before gateway/NemoClaw start, a setup wizard reads `.env`, tests real API connectivity for each configured provider, and lets the user choose a default model. The choice is written into both `blueprint.yaml` and `.env` (`MODEL_ID`), ensuring the full stack (gateway → NemoClaw → sandbox) uses the user's preferred model from the first boot.
+7.  **Interactive Model Setup (`setup.py`)**: Before gateway/NemoClaw start, a setup wizard reads `.env`, tests real API connectivity for each configured provider, and lets the user choose a default model. The choice is written into both `blueprint.yaml` and `.env` (`MODEL_ID`), ensuring the full stack (gateway -> NemoClaw -> sandbox) uses the user's preferred model from the first boot. TTY auto-detection (`sys.stdin.isatty()`) enables non-interactive mode when no terminal is attached (CI/SSH without `-t`).
+8.  **Blueprint Pre-merge**: Custom blueprint is synced into the NemoClaw source tree *before* `install.sh` runs, so the first onboard uses our config directly. This eliminates the need for a second onboard pass, saving ~3-5 minutes. All official policy files (not just presets) are preserved before `rsync --delete`.
+9.  **Gateway Systemd Service**: `guard-gateway.service` provides auto-start on EC2 reboot and crash recovery (RestartSec=3), replacing the `nohup` approach which doesn't survive reboots.
+10. **OpenClaw Version Override**: `OPENCLAW_VERSION` env var triggers a local build of `Dockerfile.base` (tagged as `ghcr.io/nvidia/nemoclaw/sandbox-base:latest`), so the sandbox `FROM` uses the locally-built base with the desired version. This avoids the +1.7GB image bloat from injecting `npm install` into the sandbox Dockerfile (which would create a second copy of openclaw in Docker's overlay FS).
 
 ---
 
@@ -124,19 +127,23 @@ Previously, `NEMOCLAW_MODEL` was hardcoded to `openrouter/stepfun/step-3.5-flash
 
 ### Execution Flow in `install_blueprint_ec2.sh`
 ```
-Step 0: System dependencies
-Step 1: Python venv + pip install
-Step 1b: setup.py (reads .env, tests APIs, user picks model)  ◄── NEW
-Step 2: Start gateway.py (with MODEL_ID from setup.py)
-Step 3: NemoClaw install (NEMOCLAW_MODEL = $MODEL_ID)
-Step 4: Sync blueprint (already patched by setup.py)
-Step 5: Persist PATH to ~/.bashrc
+Step 0:  System dependencies (apt-get)
+Step 1:  Python venv + pip install
+Step 1b: setup.py (reads .env, tests APIs, user picks model; TTY auto-detect)
+Step 2:  Start gateway.py (with MODEL_ID from setup.py)
+Step 3:  Download NemoClaw source tarball (persistent ~/.nemoclaw/source/)
+Step 3b: Pre-merge Guard Blueprint into source tree (all policies/*, not just presets)
+Step 3c: (Optional) If OPENCLAW_VERSION set: build Dockerfile.base locally
+Step 3d: Run official scripts/install.sh (NEMOCLAW_REPO_ROOT → Path A from source)
+Step 4a: Persist PATH to ~/.bashrc
+Step 4b: Configure systemd guard-gateway.service (auto-start on reboot)
 ```
+Note: The previous Step 4 (second onboard) has been eliminated by pre-merging the blueprint before install.sh runs.
 
 ### Key Design Decisions
 - **Runs before gateway**: setup.py tests upstream providers directly (not via the local gateway) so it works on a fresh install.
 - **Writes both .env and blueprint.yaml**: `.env` is consumed by gateway.py and start scripts; `blueprint.yaml` is consumed by NemoClaw onboard.
-- **`--non-interactive` flag**: For CI/automation, auto-selects the first reachable model.
+- **TTY auto-detect**: `sys.stdin.isatty()` auto-switches to non-interactive when no terminal is attached (CI/SSH without `-t`). Override with `--interactive` or `--non-interactive` flags.
 - **No new dependencies**: Uses `httpx` and `pyyaml` already in `requirements.txt`.
 
 ---
@@ -148,12 +155,60 @@ To ensure NemoClaw consumes the project-specific blueprint without requiring com
 ### The Mechanism
 NemoClaw's onboarding engine uses a prioritized search path for blueprints. The primary authoritative location is the user's global configuration directory: `~/.nemoclaw/source/nemoclaw-blueprint/`.
 
-### Implementation Steps
-1.  **Authoritative Synchronization**: The installation scripts use `rsync -a --delete` to mirror the project's `./nemoclaw-blueprint/` folder into the global search path.
-2.  **Implicit Loading**: When `nemoclaw onboard` is executed, it automatically discovers and loads the `blueprint.yaml` from this synchronized global location.
-3.  **Cross-Layer Binding**: Since the blueprint defines relative mappings (e.g., `sandbox_workspace/openclaw`), and the command is executed from the project root, NemoClaw successfully binds the host-side configuration (Layer 2) to the sandbox runtime (Layer 3).
+### Implementation Steps (v2: Pre-merge)
+1.  **Source Download**: The installer downloads the NemoClaw source tarball to `~/.nemoclaw/source/` (bypassing the official `nemoclaw.sh` bootstrap which has a temp-dir cleanup bug).
+2.  **Pre-merge**: Before running `install.sh`, the installer copies official policy presets into our project directory, then uses `rsync -a --delete` to overwrite the source tree's `nemoclaw-blueprint/` with our custom version.
+3.  **Single Onboard**: `install.sh` runs its built-in onboard step, which automatically uses the pre-merged blueprint. No second onboard is needed.
+4.  **Cross-Layer Binding**: The blueprint defines relative mappings (e.g., `sandbox_workspace/openclaw`), and NemoClaw binds host-side configuration (Layer 2) to the sandbox runtime (Layer 3).
 
 This strategy guarantees that the **Source of Truth** always resides within the version-controlled repository while remaining perfectly compatible with NemoClaw's standardized deployment lifecycle.
+
+---
+
+## 5b. OpenClaw Version Override Strategy
+
+### Problem
+The GHCR base image (`ghcr.io/nvidia/nemoclaw/sandbox-base:latest`) pins a specific OpenClaw version (e.g., `2026.3.11`). Users may need a newer or different version without waiting for the GHCR image to be updated.
+
+### Failed Approaches
+1. **`sed` on `Dockerfile.base` only**: The sandbox `Dockerfile` uses `FROM ghcr.io/...sandbox-base:latest` — it pulls the pre-built GHCR image, ignoring local `Dockerfile.base` modifications.
+2. **Inject `RUN npm install -g openclaw@X` into sandbox `Dockerfile`**: Creates a new Docker layer with the second copy of openclaw. Due to Docker's overlay filesystem, the old version in the base layer cannot be removed, resulting in **+1.7GB image bloat** (4.1GB vs 2.4GB). The OpenShell gateway's image upload times out on constrained instances.
+3. **Merge `npm install` into existing `RUN` layer**: Same 4.1GB result — npm downloads to cache + installs new openclaw, while old version persists in base layer below.
+
+### Working Solution: Local Base Image Build
+```
+.env (OPENCLAW_VERSION=2026.4.2)
+    │
+    ▼
+sed on Dockerfile.base: openclaw@2026.3.11 → openclaw@2026.4.2
+    │
+    ▼
+docker build -f Dockerfile.base -t ghcr.io/nvidia/nemoclaw/sandbox-base:latest .
+    │
+    ▼
+nemoclaw onboard → sandbox Dockerfile FROM ${BASE_IMAGE} → uses local image
+    │
+    ▼
+Sandbox has openclaw@2026.4.2 (image size: ~2.2GB, same as default)
+```
+
+The local build tags the image with the same name as the GHCR image, so Docker's `FROM` directive uses the local version instead of pulling from GHCR. The resulting image is actually slightly smaller (~2.2GB vs ~2.4GB) because it only contains one version of openclaw.
+
+---
+
+## 5c. Gateway Persistence (systemd)
+
+### Problem
+The gateway was started via `nohup`, which doesn't survive EC2 reboots. Manual intervention was required after every reboot.
+
+### Solution
+The installer creates a systemd service `guard-gateway.service`:
+- **Auto-start on boot** (`WantedBy=multi-user.target`)
+- **Crash recovery** (`Restart=always`, `RestartSec=3`)
+- **Environment from `.env`** (`EnvironmentFile=$PROJECT_DIR/.env`)
+- **Replaces nohup**: The installer kills the nohup gateway before enabling systemd
+
+The nohup launch in Step 2 is still needed for the installation process itself (NemoClaw onboard requires a running gateway), but systemd takes over in Step 4b.
 
 ---
 
