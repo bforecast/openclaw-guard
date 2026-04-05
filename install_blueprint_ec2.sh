@@ -48,7 +48,7 @@ if [ -f "$PROJECT_DIR/.env" ]; then
     # 加载 .env 供 setup.py 读取（仅在当前子 shell）
     set -a && source "$PROJECT_DIR/.env" && set +a
 fi
-"$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/setup.py" --non-interactive --project-dir "$PROJECT_DIR"
+"$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/setup.py" --project-dir "$PROJECT_DIR"
 
 # 重新加载 .env（setup.py 可能已写入 MODEL_ID）
 if [ -f "$PROJECT_DIR/.env" ]; then
@@ -113,14 +113,28 @@ fi
 # 在 install.sh 运行前，先把我们的自定义 Blueprint 合入源码树
 # 这样第一次 onboard 就直接使用，省掉二次 onboard
 echo "[3b/4] Pre-merging Guard Blueprint into source tree..."
-OFFICIAL_PRESETS="$NEMOCLAW_SRC/nemoclaw-blueprint/policies/presets"
-if [ -d "$OFFICIAL_PRESETS" ]; then
-    mkdir -p "$PROJECT_DIR/nemoclaw-blueprint/policies/presets"
-    cp -rn "$OFFICIAL_PRESETS/"* "$PROJECT_DIR/nemoclaw-blueprint/policies/presets/" 2>/dev/null || true
+OFFICIAL_POLICIES="$NEMOCLAW_SRC/nemoclaw-blueprint/policies"
+if [ -d "$OFFICIAL_POLICIES" ]; then
+    mkdir -p "$PROJECT_DIR/nemoclaw-blueprint/policies"
+    cp -rn "$OFFICIAL_POLICIES/"* "$PROJECT_DIR/nemoclaw-blueprint/policies/" 2>/dev/null || true
 fi
 rsync -a --delete "$PROJECT_DIR/nemoclaw-blueprint/" "$NEMOCLAW_SRC/nemoclaw-blueprint/"
 
+# 可选：覆盖 OpenClaw 版本 — 本地构建基础镜像替换 GHCR 预构建版本
+# 直接在 Dockerfile 注入 npm install 会导致镜像膨胀 +1.7GB（npm 缓存 + 双份 openclaw），
+# 因此改为本地构建 Dockerfile.base 并标记为 ghcr 镜像名，让 sandbox Dockerfile FROM 使用本地版本
+if [ -n "${OPENCLAW_VERSION:-}" ]; then
+    echo "Overriding OpenClaw version to: $OPENCLAW_VERSION"
+    sed -i "s|openclaw@[0-9][0-9.]*|openclaw@${OPENCLAW_VERSION}|g" "$NEMOCLAW_SRC/Dockerfile.base"
+    echo "Building local base image with openclaw@${OPENCLAW_VERSION}..."
+    docker build -f "$NEMOCLAW_SRC/Dockerfile.base" -t ghcr.io/nvidia/nemoclaw/sandbox-base:latest "$NEMOCLAW_SRC"
+    echo "✓ Local base image built with openclaw@${OPENCLAW_VERSION}"
+fi
+
 # 从持久源码目录运行官方安装器（跳过 bootstrap 包装器）
+# NEMOCLAW_REPO_ROOT 告诉 install.sh 的 is_source_checkout() 这是持久源码，
+# 避免它重新 git clone 覆盖我们的修改（如 OPENCLAW_VERSION、blueprint 预合并）
+export NEMOCLAW_REPO_ROOT="$NEMOCLAW_SRC"
 bash "$NEMOCLAW_SRC/scripts/install.sh"
 
 # 确保加载 nvm 环境
@@ -137,15 +151,55 @@ fi
 echo "✓ nemoclaw CLI verified: $(nemoclaw --version 2>/dev/null || echo 'ok')"
 
 # ---------------------------------------------------------------------------
-# 4. 持久化环境变量 (Persistence)
+# 4. 持久化 (Persistence: bashrc + systemd gateway)
 # ---------------------------------------------------------------------------
+
+# 4a. bashrc PATH 持久化
 if ! grep -q "NemoClaw PATH setup" "$HOME/.bashrc"; then
     echo "" >> "$HOME/.bashrc"
     echo "# NemoClaw PATH setup" >> "$HOME/.bashrc"
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
     echo '[ -s "$HOME/.nvm/nvm.sh" ] && \. "$HOME/.nvm/nvm.sh"' >> "$HOME/.bashrc"
     echo "# end NemoClaw PATH setup" >> "$HOME/.bashrc"
-    echo "鉁 Environment variables persisted to ~/.bashrc"
+fi
+
+# 4b. systemd 服务：gateway 开机自启 + 崩溃自动重启
+echo "Setting up gateway systemd service..."
+# 先停掉之前 nohup 启动的 gateway（systemd 接管）
+lsof -t -i :8090 | xargs kill -9 2>/dev/null || true
+
+sudo tee /etc/systemd/system/guard-gateway.service > /dev/null <<UNIT
+[Unit]
+Description=OpenClaw Security Gateway
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=$(whoami)
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=$PROJECT_DIR/.env
+ExecStart=$PROJECT_DIR/.venv/bin/python $PROJECT_DIR/src/gateway.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+sudo systemctl daemon-reload
+sudo systemctl enable guard-gateway >/dev/null 2>&1
+sudo systemctl start guard-gateway
+
+# 等待 systemd gateway 就绪
+for i in {1..10}; do
+    if curl -s http://127.0.0.1:8090/health > /dev/null; then break; fi
+    sleep 1
+done
+
+if curl -s http://127.0.0.1:8090/health > /dev/null; then
+    echo "✓ Gateway systemd service active (auto-start on reboot)"
+else
+    echo "WARN: Gateway service may not be ready yet. Check: sudo systemctl status guard-gateway"
 fi
 
 echo ""
