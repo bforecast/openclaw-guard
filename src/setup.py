@@ -297,7 +297,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--non-interactive",
         action="store_true",
+        default=None,
         help="Auto-select first available model without prompting",
     )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        default=None,
+        help="Force interactive mode even without TTY",
+    )
     args = parser.parse_args()
-    main(args.project_dir, args.non_interactive)
+
+    # Auto-detect: interactive if stdin is a TTY, otherwise non-interactive
+    if args.interactive:
+        non_interactive = False
+    elif args.non_interactive:
+        non_interactive = True
+    else:
+        non_interactive = not sys.stdin.isatty()
+        if non_interactive:
+            print("(no TTY detected, using non-interactive mode)")
+
+    main(args.project_dir, non_interactive)
