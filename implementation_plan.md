@@ -230,5 +230,65 @@ During installation, the **Model Setup Wizard** (`src/setup.py`) will automatica
 
 ### Maintenance
 *   **Security Rules**: Modify `src/gateway.py` to add new blocking patterns.
-*   **Network Policies**: Update `nemoclaw-blueprint/policies/openclaw-sandbox.yaml`.
+*   **Network Policies**: Update `nemoclaw-blueprint/blueprint.yaml` `network.{install,runtime}` sections, then `POST /v1/network/policy/reload` to hot-reload without restart. The runtime allow-list is automatically projected into the OpenShell Landlock-style policy by `onboard.py:_project_network_policies()`.
 *   **Artifact Sync**: Use `src/cli.py onboard` to regenerate sandbox configurations when blueprint structure changes.
+
+---
+
+## 7. Network Authorization & Real-time Detection (V6)
+
+Adds an explicit network layer that complements the existing pattern matching, plugging two long-standing gaps:
+
+1.  **Install-time blind spot** — `install_blueprint_*.sh` previously trusted any host that `curl`/`pip`/`npm` reached during Step 3.
+2.  **Runtime invisibility** — `gateway.py` only audited *which provider/model* a request hit, never *which TCP endpoint* the host actually connected to, nor whether sandbox processes were performing out-of-band egress.
+
+### 7.1 Architecture
+
+```mermaid
+flowchart LR
+    subgraph Install [Install Phase]
+        Script[install_blueprint_ec2.sh] -->|http_proxy=:8091| Proxy[install_proxy.py]
+        Proxy -->|allow-listed CONNECT| Internet1[github.com / npm / pypi / ghcr]
+        Proxy -.->|denied| Audit[(security_audit.db<br/>network_events)]
+    end
+    subgraph Runtime [Runtime Phase]
+        GW[gateway.py] -->|authorize+record| Monitor[NetworkMonitor]
+        GW --> Upstream[api.openai.com / openrouter.ai / ...]
+        Monitor --> Audit
+        Capture[network_capture.py<br/>eBPF / ss fallback] -->|tcp_v4_connect| Audit
+        Capture -.watches PIDs.-> GW
+        Capture -.watches PIDs.-> Sandbox[OpenClaw sandbox container]
+    end
+```
+
+### 7.2 Components
+
+| Component | Layer | Backend | Default |
+|---|---|---|---|
+| `network_monitor.py` | Library | sqlite3 | n/a |
+| `install_proxy.py` | Install proxy on `127.0.0.1:8091` | stdlib socket + select | `default: deny` |
+| `gateway.py` upstream hooks | Application | httpx interception | `default: warn` |
+| `network_capture.py` | Kernel daemon | bcc eBPF, ss fallback | `default: warn` |
+
+### 7.3 Decision Model
+
+`NetworkMonitor.authorize(host, port, scope)` returns one of:
+- `allow` — entry matched, enforcement=enforce
+- `warn` — recorded with non-fatal reason
+- `monitor` — recorded silently
+- `block` — default=deny + no entry, OR rate limit exceeded
+
+Per-entry `rate_limit: { rpm: N }` uses a 60-second sliding window keyed on `host`. Hot-reload via `POST /v1/network/policy/reload` clears the rate buckets.
+
+### 7.4 systemd
+
+Two units, EnvironmentFile of `.env`:
+- `guard-gateway.service` — runs as the install user, app-layer monitor + LLM router
+- `guard-network-capture.service` — runs as `root` (eBPF requires CAP_BPF/CAP_SYS_ADMIN), eBPF or ss fallback
+
+### 7.5 Deliberate Non-goals
+
+- TLS termination (no MitM, no CA injection — splice-only)
+- DNS sinkhole (handled separately if needed)
+- Egress quotas / billing
+- Webhook alert delivery (the audit table is the integration point)

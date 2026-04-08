@@ -21,6 +21,9 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from urllib.parse import urlparse
+
+from guard.network_monitor import BLOCK as NET_BLOCK, get_default as get_network_monitor
 
 PROVIDERS = {
     "openai": {
@@ -100,6 +103,11 @@ else:
 LOG_DIR = Path(__file__).parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 DB_PATH = LOG_DIR / "security_audit.db"
+BLUEPRINT_PATH = Path(__file__).parent.parent / "nemoclaw-blueprint" / "blueprint.yaml"
+
+# Initialize the shared NetworkMonitor early so the audit DB has both tables
+# (audit_log + network_events) before the first request lands.
+network_monitor = get_network_monitor(blueprint_path=BLUEPRINT_PATH, db_path=DB_PATH)
 
 DANGEROUS_PATTERNS = [
     r"\brm\s+-rf\b",
@@ -497,7 +505,44 @@ async def health():
         "providers": available,
         "default_provider": DEFAULT_PROVIDER,
         "default_model": DEFAULT_MODEL,
+        "network_monitor": "ok",
+        "network_policy": network_monitor.policy_summary(),
     }
+
+
+def _admin_token_ok(request: Request) -> bool:
+    expected = os.environ.get("GUARD_ADMIN_TOKEN") or os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+    if not expected:
+        return True  # no token configured -> open (local-only diagnostic)
+    presented = request.headers.get("Authorization", "")
+    if presented.startswith("Bearer "):
+        presented = presented[7:]
+    return presented == expected
+
+
+@app.get("/v1/network/events")
+async def list_network_events(request: Request):
+    if not _admin_token_ok(request):
+        return JSONResponse(
+            {"error": {"message": "admin token required", "type": "auth"}},
+            status_code=401,
+        )
+    try:
+        limit = int(request.query_params.get("limit", "100"))
+    except ValueError:
+        limit = 100
+    return {"events": network_monitor.recent_events(limit=max(1, min(limit, 1000)))}
+
+
+@app.post("/v1/network/policy/reload")
+async def reload_network_policy(request: Request):
+    if not _admin_token_ok(request):
+        return JSONResponse(
+            {"error": {"message": "admin token required", "type": "auth"}},
+            status_code=401,
+        )
+    network_monitor.reload()
+    return {"status": "reloaded", "policy": network_monitor.policy_summary()}
 
 
 @app.get("/v1/models")
@@ -821,6 +866,38 @@ async def responses(request: Request):
     )
 
 
+def _upstream_target(base_url: str, endpoint: str) -> tuple[str, int, str]:
+    parsed = urlparse(f"{base_url}{endpoint}")
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return host, port, parsed.path or endpoint
+
+
+def _network_block_response(
+    provider_name: str,
+    requested_model: str,
+    model: str,
+    decision_reason: str,
+) -> Response:
+    return Response(
+        content=json.dumps(
+            {
+                "error": {
+                    "message": (
+                        "Upstream blocked by network authorization policy: "
+                        f"{decision_reason}"
+                    ),
+                    "type": "network_policy_block",
+                    "code": "egress_denied",
+                }
+            }
+        ),
+        status_code=403,
+        media_type="application/json",
+        headers=_gateway_debug_headers(provider_name, requested_model, model),
+    )
+
+
 async def _forward_upstream(
     provider_name: str,
     requested_model: str,
@@ -830,6 +907,18 @@ async def _forward_upstream(
     body: dict,
     headers: dict,
 ) -> Response:
+    host, port, path = _upstream_target(base_url, endpoint)
+    decision = network_monitor.authorize(host, port, scope="runtime")
+    if decision.verdict == NET_BLOCK:
+        log.warning("NET-BLOCK [%s/%s] %s:%d (%s)", provider_name, model, host, port, decision.reason)
+        network_monitor.record(
+            source="gateway", scope="runtime",
+            host=host, port=port, decision=decision,
+            method="POST", path=path,
+        )
+        return _network_block_response(provider_name, requested_model, model, decision.reason)
+
+    start_ts = asyncio.get_event_loop().time()
     max_retries = max(0, int(os.environ.get("GATEWAY_429_RETRIES", "2")))
     async with httpx.AsyncClient(timeout=120) as client:
         resp = None
@@ -853,7 +942,20 @@ async def _forward_upstream(
             )
             await asyncio.sleep(delay)
 
+        latency_ms = int((asyncio.get_event_loop().time() - start_ts) * 1000)
+
+        def _emit_event(status_code: int, bytes_in: int) -> None:
+            network_monitor.record(
+                source="gateway", scope="runtime",
+                host=host, port=port, decision=decision,
+                method="POST", path=path,
+                status=status_code, bytes_in=bytes_in,
+                bytes_out=len(json.dumps(body)) if body else 0,
+                latency_ms=latency_ms,
+            )
+
         if resp is None:
+            _emit_event(502, 0)
             return Response(
                 content=json.dumps(
                     {
@@ -873,6 +975,7 @@ async def _forward_upstream(
                 ),
             )
         if resp.status_code >= 400:
+            _emit_event(resp.status_code, len(resp.content) if resp.content else 0)
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
@@ -930,6 +1033,7 @@ async def _forward_upstream(
                     ),
                 )
 
+        _emit_event(resp.status_code, len(resp.content) if resp.content else 0)
         return Response(
             content=resp.content,
             status_code=resp.status_code,
@@ -953,40 +1057,82 @@ def _stream_upstream(
     headers: dict,
     provider_cfg: dict,
 ) -> StreamingResponse:
+    host, port, path = _upstream_target(base_url, endpoint)
+    decision = network_monitor.authorize(host, port, scope="runtime")
+    if decision.verdict == NET_BLOCK:
+        log.warning(
+            "NET-BLOCK-STREAM [%s/%s] %s:%d (%s)",
+            provider_name, routed_model, host, port, decision.reason,
+        )
+        network_monitor.record(
+            source="gateway", scope="runtime",
+            host=host, port=port, decision=decision,
+            method="POST-STREAM", path=path,
+        )
+        blocked = _network_block_response(provider_name, requested_model, routed_model, decision.reason)
+
+        async def _blocked_gen():
+            yield blocked.body
+
+        return StreamingResponse(
+            _blocked_gen(),
+            status_code=403,
+            media_type="application/json",
+            headers=_gateway_debug_headers(provider_name, requested_model, routed_model),
+        )
+
     async def generate():
         max_retries = max(0, int(os.environ.get("GATEWAY_429_RETRIES", "2")))
-        async with httpx.AsyncClient(timeout=120) as client:
-            attempt = 0
-            while True:
-                async with client.stream(
-                    "POST",
-                    f"{base_url}{endpoint}",
-                    json=body,
-                    headers=headers,
-                ) as resp:
-                    if resp.status_code == 429 and attempt < max_retries:
-                        retry_after = resp.headers.get("Retry-After")
-                        delay = _retry_delay_seconds(attempt + 1, retry_after)
-                        log.warning(
-                            "UPSTREAM-429-STREAM [%s/%s]: retry %d/%d in %.1fs",
-                            provider_name,
-                            routed_model,
-                            attempt + 1,
-                            max_retries,
-                            delay,
-                        )
-                        await resp.aread()
-                        await asyncio.sleep(delay)
-                        attempt += 1
-                        continue
+        start_ts = asyncio.get_event_loop().time()
+        total_in = 0
+        final_status = 200
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                attempt = 0
+                while True:
+                    async with client.stream(
+                        "POST",
+                        f"{base_url}{endpoint}",
+                        json=body,
+                        headers=headers,
+                    ) as resp:
+                        if resp.status_code == 429 and attempt < max_retries:
+                            retry_after = resp.headers.get("Retry-After")
+                            delay = _retry_delay_seconds(attempt + 1, retry_after)
+                            log.warning(
+                                "UPSTREAM-429-STREAM [%s/%s]: retry %d/%d in %.1fs",
+                                provider_name,
+                                routed_model,
+                                attempt + 1,
+                                max_retries,
+                                delay,
+                            )
+                            await resp.aread()
+                            await asyncio.sleep(delay)
+                            attempt += 1
+                            continue
 
-                    if resp.status_code >= 400:
-                        yield await resp.aread()
+                        if resp.status_code >= 400:
+                            final_status = resp.status_code
+                            payload = await resp.aread()
+                            total_in += len(payload)
+                            yield payload
+                            return
+
+                        async for chunk in resp.aiter_bytes():
+                            total_in += len(chunk)
+                            yield chunk
                         return
-
-                    async for chunk in resp.aiter_bytes():
-                        yield chunk
-                    return
+        finally:
+            latency_ms = int((asyncio.get_event_loop().time() - start_ts) * 1000)
+            network_monitor.record(
+                source="gateway", scope="runtime",
+                host=host, port=port, decision=decision,
+                method="POST-STREAM", path=path,
+                status=final_status, bytes_in=total_in,
+                bytes_out=len(json.dumps(body)) if body else 0,
+                latency_ms=latency_ms,
+            )
 
     return StreamingResponse(
         generate(),
