@@ -1,11 +1,46 @@
 import os
 import subprocess
+from pathlib import Path
 
 import typer
 
-from onboard import prepare_onboarding
+from guard import blueprint_io
+from guard.onboard import prepare_onboarding
 
 app = typer.Typer(help="OpenClaw Guard - Unbypassable Security Gateway CLI")
+net_app = typer.Typer(help="Manage blueprint network whitelist (install/runtime).")
+app.add_typer(net_app, name="net")
+
+
+def _blueprint_path() -> Path:
+    """Resolve blueprint.yaml relative to this file's project root."""
+    return Path(__file__).resolve().parent.parent / "nemoclaw-blueprint" / "blueprint.yaml"
+
+
+def _gateway_reload(gateway_url: str, token: str | None) -> None:
+    """POST /v1/network/policy/reload to live-reload the gateway."""
+    import httpx  # local import to keep base CLI startup light
+
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        resp = httpx.post(
+            f"{gateway_url.rstrip('/')}/v1/network/policy/reload",
+            headers=headers,
+            timeout=5.0,
+        )
+        if resp.status_code == 200:
+            typer.secho(f"   OK gateway reloaded ({gateway_url})", fg=typer.colors.GREEN)
+        else:
+            typer.secho(
+                f"   WARN gateway reload returned {resp.status_code}: {resp.text[:200]}",
+                fg=typer.colors.YELLOW,
+            )
+    except Exception as exc:
+        typer.secho(
+            f"   WARN gateway not reachable at {gateway_url} ({exc}); "
+            "edit took effect on disk only",
+            fg=typer.colors.YELLOW,
+        )
 
 # ---------------------------------------------------------------------------
 # All providers that we register. Each one points to our security gateway
@@ -197,6 +232,113 @@ def providers():
             f"  {provider_name:12s}  {provider_config['display']:40s}  {status}"
         )
     typer.echo("")
+
+
+# ── network whitelist subcommands ───────────────────────────────────────────
+@net_app.command("list")
+def net_list(
+    scope: str = typer.Option("runtime", help="install | runtime"),
+):
+    """Show all whitelist entries for a scope."""
+    bp = _blueprint_path()
+    try:
+        default = blueprint_io.get_default(bp, scope)
+        entries = blueprint_io.list_entries(bp, scope)
+    except blueprint_io.BlueprintError as exc:
+        typer.secho(f"ERROR: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    typer.echo(f"\nnetwork.{scope}.default = {default}")
+    typer.echo(f"network.{scope}.allow ({len(entries)} entries):\n")
+    typer.echo(f"  {'HOST':<40} {'PORTS':<12} {'ENFORCE':<10} {'RPM':<8} PURPOSE")
+    typer.echo(f"  {'-' * 40} {'-' * 12} {'-' * 10} {'-' * 8} {'-' * 20}")
+    for e in entries:
+        ports = ",".join(str(p) for p in e.ports) or "*"
+        enf = e.enforcement or "-"
+        rpm = str(e.rpm) if e.rpm is not None else "-"
+        typer.echo(f"  {e.host:<40} {ports:<12} {enf:<10} {rpm:<8} {e.purpose}")
+    typer.echo("")
+
+
+@net_app.command("add")
+def net_add(
+    host: str = typer.Argument(..., help="Hostname (e.g. api.deepseek.com or *.foo.com)"),
+    scope: str = typer.Option("runtime", help="install | runtime"),
+    port: list[int] = typer.Option([443], "--port", "-p", help="Port (repeatable)"),
+    enforcement: str = typer.Option(
+        None, "--enforcement", "-e",
+        help="enforce | warn | monitor (omit to use scope default)",
+    ),
+    purpose: str = typer.Option("", "--purpose", help="Free-text reason"),
+    rpm: int = typer.Option(None, "--rpm", help="Per-host rate limit (req/min)"),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+    no_reload: bool = typer.Option(False, "--no-reload", help="Skip gateway hot-reload"),
+):
+    """Add a hostname to the whitelist and hot-reload the gateway."""
+    bp = _blueprint_path()
+    try:
+        added = blueprint_io.add_entry(
+            bp, scope=scope, host=host, ports=port,
+            enforcement=enforcement, purpose=purpose, rpm=rpm,
+        )
+    except blueprint_io.BlueprintError as exc:
+        typer.secho(f"ERROR: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    if not added:
+        typer.secho(
+            f"   {host!r} already exists in network.{scope}.allow — no change",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(0)
+
+    typer.secho(f"   OK added {host} to network.{scope}.allow", fg=typer.colors.GREEN)
+    if not no_reload:
+        token = os.environ.get("GUARD_ADMIN_TOKEN") or os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+        _gateway_reload(gateway_url, token)
+
+
+@net_app.command("remove")
+def net_remove(
+    host: str = typer.Argument(...),
+    scope: str = typer.Option("runtime", help="install | runtime"),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+    no_reload: bool = typer.Option(False, "--no-reload"),
+):
+    """Remove a hostname from the whitelist and hot-reload the gateway."""
+    bp = _blueprint_path()
+    try:
+        removed = blueprint_io.remove_entry(bp, scope=scope, host=host)
+    except blueprint_io.BlueprintError as exc:
+        typer.secho(f"ERROR: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    if not removed:
+        typer.secho(
+            f"   {host!r} not found in network.{scope}.allow",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(0)
+
+    typer.secho(f"   OK removed {host} from network.{scope}.allow", fg=typer.colors.GREEN)
+    if not no_reload:
+        token = os.environ.get("GUARD_ADMIN_TOKEN") or os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+        _gateway_reload(gateway_url, token)
+
+
+@net_app.command("reload")
+def net_reload(
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Hot-reload the gateway's network policy from blueprint.yaml.
+
+    Note: this only refreshes gateway.py.  network_capture.py reloads its
+    DNSForwardCache on its own TTL (default 300 s); restart its systemd unit
+    if you need an immediate effect there:
+        sudo systemctl restart guard-network-capture
+    """
+    token = os.environ.get("GUARD_ADMIN_TOKEN") or os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+    _gateway_reload(gateway_url, token)
 
 
 if __name__ == "__main__":
