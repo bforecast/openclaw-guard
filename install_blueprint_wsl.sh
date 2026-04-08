@@ -36,18 +36,18 @@ echo "[1/4] Preparing Security Gateway and DNS..."
 # 初始化 Python 环境
 echo "Setting up Python virtual environment..."
 rm -rf "$PROJECT_DIR/.venv"
-python3 -m venv "$PROJECT_DIR/.venv"
-"$PROJECT_DIR/.venv/bin/python" -m pip install -q --upgrade pip
-"$PROJECT_DIR/.venv/bin/python" -m pip install -q -r "$PROJECT_DIR/src/requirements.txt"
+python3 -m venv --system-site-packages "$PROJECT_DIR/.venv"
+"$PROJECT_DIR/.venv/bin/python" -m pip install -q --upgrade pip setuptools
+"$PROJECT_DIR/.venv/bin/python" -m pip install -q -e "$PROJECT_DIR"
 
 # 启动网关 — 仅将 .env 变量注入 gateway 进程，不污染全局 shell 环境
 lsof -t -i :8090 | xargs kill -9 2>/dev/null || true
 mkdir -p "$PROJECT_DIR/logs"
 if [ -f "$PROJECT_DIR/.env" ]; then
     env $(grep -v '^#' "$PROJECT_DIR/.env" | xargs) \
-        nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+        nohup "$PROJECT_DIR/.venv/bin/python" -m guard.gateway > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
 else
-    nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+    nohup "$PROJECT_DIR/.venv/bin/python" -m guard.gateway > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
 fi
 
 # 等待网关就绪
@@ -60,6 +60,28 @@ done
 if ! grep -q "host.openshell.internal" /etc/hosts; then
     echo "127.0.0.1 host.openshell.internal" | sudo tee -a /etc/hosts
 fi
+
+# 启动 install-time 网络授权代理 + kernel 抓取
+echo "Starting install-time network proxy on 127.0.0.1:8091..."
+nohup "$PROJECT_DIR/.venv/bin/python" -m guard.install_proxy \
+    --blueprint "$PROJECT_DIR/nemoclaw-blueprint/blueprint.yaml" \
+    --audit-db "$PROJECT_DIR/logs/security_audit.db" \
+    > "$PROJECT_DIR/logs/install_proxy.log" 2>&1 &
+INSTALL_PROXY_PID=$!
+trap '[ -n "${INSTALL_PROXY_PID:-}" ] && kill $INSTALL_PROXY_PID 2>/dev/null || true' EXIT
+sleep 1
+
+nohup "$PROJECT_DIR/.venv/bin/python" -m guard.network_capture \
+    --blueprint "$PROJECT_DIR/nemoclaw-blueprint/blueprint.yaml" \
+    --audit-db "$PROJECT_DIR/logs/security_audit.db" \
+    > "$PROJECT_DIR/logs/network_capture.log" 2>&1 &
+
+export http_proxy="http://127.0.0.1:8091"
+export https_proxy="http://127.0.0.1:8091"
+export HTTP_PROXY="$http_proxy"
+export HTTPS_PROXY="$https_proxy"
+export NO_PROXY="127.0.0.1,localhost,host.openshell.internal,host.docker.internal,::1"
+export no_proxy="$NO_PROXY"
 
 # ---------------------------------------------------------------------------
 # 2. 调用官方安装程序 (Official Engine Setup)

@@ -34,23 +34,25 @@ echo "鉁 Docker is ready and accessible."
 echo "[1/4] Preparing Python Environment..."
 
 # 初始化 Python 环境
+# --system-site-packages 让 venv 继承 python3-bpfcc (eBPF 只有 apt 包)
 echo "Setting up Python virtual environment..."
 rm -rf "$PROJECT_DIR/.venv"
-python3 -m venv "$PROJECT_DIR/.venv"
-"$PROJECT_DIR/.venv/bin/python" -m pip install -q --upgrade pip
-"$PROJECT_DIR/.venv/bin/python" -m pip install -q -r "$PROJECT_DIR/src/requirements.txt"
+python3 -m venv --system-site-packages "$PROJECT_DIR/.venv"
+"$PROJECT_DIR/.venv/bin/python" -m pip install -q --upgrade pip setuptools
+# 安装 guard package (editable) — 自动从 pyproject.toml 拉依赖
+"$PROJECT_DIR/.venv/bin/python" -m pip install -q -e "$PROJECT_DIR"
 
 # ---------------------------------------------------------------------------
 # 1b. 交互式模型选择 (Model Setup Wizard)
 # ---------------------------------------------------------------------------
 echo "[1b/4] Running Model Setup Wizard..."
 if [ -f "$PROJECT_DIR/.env" ]; then
-    # 加载 .env 供 setup.py 读取（仅在当前子 shell）
+    # 加载 .env 供 wizard 读取（仅在当前子 shell）
     set -a && source "$PROJECT_DIR/.env" && set +a
 fi
-"$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/setup.py" --project-dir "$PROJECT_DIR"
+"$PROJECT_DIR/.venv/bin/python" -m guard.wizard --project-dir "$PROJECT_DIR"
 
-# 重新加载 .env（setup.py 可能已写入 MODEL_ID）
+# 重新加载 .env（wizard 可能已写入 MODEL_ID）
 if [ -f "$PROJECT_DIR/.env" ]; then
     set -a && source "$PROJECT_DIR/.env" && set +a
 fi
@@ -63,9 +65,9 @@ lsof -t -i :8090 | xargs kill -9 2>/dev/null || true
 mkdir -p "$PROJECT_DIR/logs"
 if [ -f "$PROJECT_DIR/.env" ]; then
     env $(grep -v '^#' "$PROJECT_DIR/.env" | xargs) \
-        nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+        nohup "$PROJECT_DIR/.venv/bin/python" -m guard.gateway > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
 else
-    nohup "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/src/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+    nohup "$PROJECT_DIR/.venv/bin/python" -m guard.gateway > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
 fi
 
 # 等待网关就绪
@@ -78,6 +80,36 @@ done
 if ! grep -q "host.openshell.internal" /etc/hosts; then
     echo "127.0.0.1 host.openshell.internal" | sudo tee -a /etc/hosts
 fi
+
+# ---------------------------------------------------------------------------
+# 2b. 启动内核层网络抓取守护 (Kernel Network Capture)
+# ---------------------------------------------------------------------------
+echo "[2b/4] Starting kernel network capture daemon..."
+nohup "$PROJECT_DIR/.venv/bin/python" -m guard.network_capture \
+    --blueprint "$PROJECT_DIR/nemoclaw-blueprint/blueprint.yaml" \
+    --audit-db "$PROJECT_DIR/logs/security_audit.db" \
+    > "$PROJECT_DIR/logs/network_capture.log" 2>&1 &
+NETWORK_CAPTURE_PID=$!
+
+# ---------------------------------------------------------------------------
+# 2c. 启动安装期网络授权代理 (Install-time Authorization Proxy)
+# ---------------------------------------------------------------------------
+echo "[2c/4] Starting install-time network proxy on 127.0.0.1:8091..."
+nohup "$PROJECT_DIR/.venv/bin/python" -m guard.install_proxy \
+    --blueprint "$PROJECT_DIR/nemoclaw-blueprint/blueprint.yaml" \
+    --audit-db "$PROJECT_DIR/logs/security_audit.db" \
+    > "$PROJECT_DIR/logs/install_proxy.log" 2>&1 &
+INSTALL_PROXY_PID=$!
+trap '[ -n "${INSTALL_PROXY_PID:-}" ] && kill $INSTALL_PROXY_PID 2>/dev/null || true' EXIT
+sleep 1
+
+# 强制让 curl / pip / npm / git 走授权代理
+export http_proxy="http://127.0.0.1:8091"
+export https_proxy="http://127.0.0.1:8091"
+export HTTP_PROXY="$http_proxy"
+export HTTPS_PROXY="$https_proxy"
+export NO_PROXY="127.0.0.1,localhost,host.openshell.internal,host.docker.internal,::1"
+export no_proxy="$NO_PROXY"
 
 # ---------------------------------------------------------------------------
 # 3. 调用官方安装程序 (Official Engine Setup)
@@ -178,7 +210,7 @@ Type=simple
 User=$(whoami)
 WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=$PROJECT_DIR/.env
-ExecStart=$PROJECT_DIR/.venv/bin/python $PROJECT_DIR/src/gateway.py
+ExecStart=$PROJECT_DIR/.venv/bin/python -m guard.gateway
 Restart=always
 RestartSec=3
 
@@ -186,9 +218,34 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 
+# 4c. systemd 服务：network-capture 持久化
+echo "Setting up network-capture systemd service..."
+sudo tee /etc/systemd/system/guard-network-capture.service > /dev/null <<UNIT
+[Unit]
+Description=OpenClaw Guard Kernel Network Capture
+After=network.target docker.service guard-gateway.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-$PROJECT_DIR/.env
+ExecStart=$PROJECT_DIR/.venv/bin/python -m guard.network_capture --blueprint $PROJECT_DIR/nemoclaw-blueprint/blueprint.yaml --audit-db $PROJECT_DIR/logs/security_audit.db
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# 卸载安装期临时 daemon (systemd 接管 network-capture)
+[ -n "${NETWORK_CAPTURE_PID:-}" ] && kill $NETWORK_CAPTURE_PID 2>/dev/null || true
+
 sudo systemctl daemon-reload
 sudo systemctl enable guard-gateway >/dev/null 2>&1
 sudo systemctl start guard-gateway
+sudo systemctl enable guard-network-capture >/dev/null 2>&1 || true
+sudo systemctl start guard-network-capture || true
 
 # 等待 systemd gateway 就绪
 for i in {1..10}; do

@@ -6,7 +6,6 @@ set -euo pipefail
 # ===========================================================================
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_DIR="$PROJECT_DIR/src"
 VENV_DIR="$PROJECT_DIR/.venv"
 VENV_PYTHON="$VENV_DIR/bin/python"
 GATEWAY_PORT="${GATEWAY_PORT:-8090}"
@@ -37,9 +36,9 @@ fi
 
 # 3. Python Environment
 if [[ ! -d "$VENV_DIR" ]]; then
-  python3 -m venv "$VENV_DIR"
+  python3 -m venv --system-site-packages "$VENV_DIR"
 fi
-"$VENV_DIR/bin/pip" install -r "$SRC_DIR/requirements.txt"
+"$VENV_DIR/bin/pip" install -e "$PROJECT_DIR"
 
 # 4. Load & Validate Keys
 if [[ -f "$PROJECT_DIR/.env" ]]; then
@@ -69,7 +68,7 @@ fi
 echo "[4/7] Starting Security Gateway on port $GATEWAY_PORT..."
 mkdir -p "$LOGS_DIR"
 sudo fuser -k "$GATEWAY_PORT/tcp" 2>/dev/null || true
-nohup "$VENV_PYTHON" "$SRC_DIR/gateway.py" > "$LOGS_DIR/gateway.log" 2>&1 &
+nohup "$VENV_PYTHON" -m guard.gateway > "$LOGS_DIR/gateway.log" 2>&1 &
 
 echo "Waiting for gateway health check..."
 for i in {1..15}; do
@@ -89,7 +88,7 @@ export NEMOCLAW_MODEL="stepfun/step-3.5-flash:free"
 export COMPATIBLE_API_KEY="${OPENROUTER_API_KEY:-${OPENAI_API_KEY:-mock-key}}"
 
 # Generate blueprint
-"$VENV_PYTHON" "$SRC_DIR/cli.py" onboard --workspace "$PROJECT_DIR" --gateway-port "$GATEWAY_PORT"
+"$VENV_PYTHON" -m guard onboard --workspace "$PROJECT_DIR" --gateway-port "$GATEWAY_PORT"
 
 # Run onboarding
 nemoclaw onboard --non-interactive

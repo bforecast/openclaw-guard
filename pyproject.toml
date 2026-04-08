@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openclaw-guard"
+version = "0.6.0"
+description = "Security gateway and network authorization for OpenClaw / NemoClaw"
+requires-python = ">=3.10"
+dependencies = [
+    "typer",
+    "pyyaml",
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+]
+
+[project.scripts]
+guard = "guard.cli:app"
+
+[tool.setuptools]
+packages = ["guard"]

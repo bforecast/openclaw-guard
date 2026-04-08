@@ -1,10 +1,6 @@
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-import gateway  # noqa: E402
+from guard import gateway
 
 
 class ResolveProviderTests(unittest.TestCase):
@@ -135,6 +131,30 @@ class AnthropicTransformTests(unittest.TestCase):
             [{"type": "text", "text": "Review this patch."}],
         )
         self.assertEqual(transformed["messages"][1]["role"], "assistant")
+
+
+class NetworkAuthorizationTests(unittest.TestCase):
+    """Smoke-test that gateway exposes the NetworkMonitor surface and that the
+    upstream-target helper extracts host/port correctly."""
+
+    def test_upstream_target_extracts_host_and_port(self):
+        host, port, path = gateway._upstream_target(
+            "https://api.openrouter.ai/api/v1", "/chat/completions"
+        )
+        self.assertEqual(host, "api.openrouter.ai")
+        self.assertEqual(port, 443)
+        self.assertEqual(path, "/api/v1/chat/completions")
+
+    def test_network_monitor_singleton_initialized(self):
+        # gateway loads NetworkMonitor at import time; policy_summary must work
+        summary = gateway.network_monitor.policy_summary()
+        self.assertIn("install", summary)
+        self.assertIn("runtime", summary)
+
+    def test_runtime_authorize_known_host_allowed(self):
+        # api.openai.com is in the default blueprint runtime allowlist with enforce
+        decision = gateway.network_monitor.authorize("api.openai.com", 443, scope="runtime")
+        self.assertIn(decision.verdict, ("allow", "warn"))
 
 
 if __name__ == "__main__":
