@@ -40,6 +40,60 @@ def get_host_ip() -> str:
         return "host.docker.internal"
 
 
+def _load_runtime_network_allow(workspace_path: Path) -> list[dict]:
+    """Read `network.runtime.allow` from blueprint.yaml so onboarding can mirror
+    the policy into the OpenShell-style network_policies. Returns [] if missing."""
+    bp_path = workspace_path / "nemoclaw-blueprint" / "blueprint.yaml"
+    if not bp_path.exists():
+        return []
+    try:
+        data = yaml.safe_load(bp_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+    runtime = (data.get("network") or {}).get("runtime") or {}
+    allow = runtime.get("allow")
+    return allow if isinstance(allow, list) else []
+
+
+def _project_network_policies(allow_entries: list[dict]) -> dict:
+    """Convert blueprint.network.runtime.allow into the OpenShell
+    network_policies dict consumed by NemoClaw / Landlock."""
+    policies: dict[str, dict] = {}
+    for entry in allow_entries:
+        if not isinstance(entry, dict):
+            continue
+        host = entry.get("host")
+        if not isinstance(host, str) or not host:
+            continue
+        ports_raw = entry.get("ports") or [443]
+        ports = [int(p) for p in ports_raw if isinstance(p, (int, str)) and str(p).isdigit()]
+        if not ports:
+            ports = [443]
+        enforcement = entry.get("enforcement") or "enforce"
+        key = host.replace(".", "_").replace("*", "any")
+        policies[key] = {
+            "name": entry.get("purpose") or f"Allow {host}",
+            "endpoints": [
+                {
+                    "host": host,
+                    "port": port,
+                    "protocol": "rest",
+                    "enforcement": enforcement,
+                    "rules": [
+                        {"allow": {"method": "GET", "path": "/**"}},
+                        {"allow": {"method": "POST", "path": "/**"}},
+                    ],
+                }
+                for port in ports
+            ],
+            "binaries": [
+                {"path": "/usr/local/bin/openclaw"},
+                {"path": "/usr/local/bin/node"},
+            ],
+        }
+    return policies
+
+
 def prepare_onboarding(
     workspace: str | Path,
     sandbox_name: str,
@@ -70,8 +124,11 @@ def prepare_onboarding(
     blueprint_policy_dir.mkdir(parents=True, exist_ok=True)
     blueprint_policy_path = blueprint_policy_dir / f"{sandbox_name}.yaml"
 
-    _write_policy(policy_path)
-    _write_policy(blueprint_policy_path)
+    extra_policies = _project_network_policies(
+        _load_runtime_network_allow(workspace_path)
+    )
+    _write_policy(policy_path, extra_policies)
+    _write_policy(blueprint_policy_path, extra_policies)
     _write_openclaw_config(immutable_openclaw_dir / "openclaw.json", gateway_token)
     _write_auth_profiles(agent_dir / "auth-profiles.json")
     _write_sessions_file(sessions_dir / "sessions.json")
@@ -87,7 +144,7 @@ def prepare_onboarding(
     )
 
 
-def _write_policy(policy_path: Path) -> None:
+def _write_policy(policy_path: Path, extra_network_policies: dict | None = None) -> None:
     policy_doc = {
         "version": 1,
         "filesystem_policy": {
@@ -174,6 +231,10 @@ def _write_policy(policy_path: Path) -> None:
             },
         },
     }
+    if extra_network_policies:
+        # Merge blueprint-driven entries; do not overwrite the built-in trio above.
+        for key, value in extra_network_policies.items():
+            policy_doc["network_policies"].setdefault(key, value)
     with policy_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(policy_doc, handle, sort_keys=False)
 

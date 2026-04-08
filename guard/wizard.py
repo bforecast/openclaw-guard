@@ -6,9 +6,9 @@ choose a provider then a model in two steps, and writes the result into:
   1. nemoclaw-blueprint/blueprint.yaml  (inference.profiles.default.model)
   2. .env  (PROVIDER_ID=... and MODEL_ID=...)
 
-Designed to run BEFORE gateway.py starts and BEFORE nemoclaw onboard.
+Designed to run BEFORE gateway starts and BEFORE nemoclaw onboard.
 Embed in install_blueprint_ec2.sh as:
-    "$VENV_PYTHON" "$SRC_DIR/setup.py" --project-dir "$PROJECT_DIR"
+    "$VENV_PYTHON" -m guard.wizard --project-dir "$PROJECT_DIR"
 """
 
 import os
@@ -17,7 +17,8 @@ import sys
 from pathlib import Path
 
 import httpx
-import yaml
+
+from guard import blueprint_io
 
 # ── Provider / Model catalogue ───────────────────────────────────────────────
 
@@ -140,19 +141,28 @@ def test_provider(name: str, cfg: dict) -> bool:
 def update_blueprint(project_dir: Path, model_id: str) -> None:
     """Patch nemoclaw-blueprint/blueprint.yaml with chosen model."""
     bp_path = project_dir / "nemoclaw-blueprint" / "blueprint.yaml"
-    if not bp_path.exists():
-        print(f"  WARN blueprint not found at {bp_path}, skipping.")
-        return
-
-    data = yaml.safe_load(bp_path.read_text())
     try:
-        data["components"]["inference"]["profiles"]["default"]["model"] = model_id
-    except (KeyError, TypeError):
-        print("  WARN could not patch blueprint — unexpected structure.")
+        blueprint_io.set_default_model(bp_path, model_id)
+    except blueprint_io.BlueprintError as exc:
+        print(f"  WARN {exc}")
         return
-
-    bp_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
     print(f"  OK blueprint.yaml updated: model = {model_id}")
+
+
+def update_network_policy(
+    project_dir: Path,
+    install_default: str,
+    runtime_default: str,
+) -> None:
+    """Patch blueprint.yaml `network.{install,runtime}.default` in place."""
+    bp_path = project_dir / "nemoclaw-blueprint" / "blueprint.yaml"
+    try:
+        blueprint_io.set_defaults(bp_path, install_default, runtime_default)
+    except blueprint_io.BlueprintError as exc:
+        print(f"  WARN {exc}")
+        return
+    print(f"  OK blueprint.yaml updated: network.install.default={install_default}, "
+          f"network.runtime.default={runtime_default}")
 
 
 def update_dotenv(env_path: Path, provider_id: str, model_id: str) -> None:
@@ -272,9 +282,29 @@ def main(project_dir: Path, non_interactive: bool = False) -> str:
 
     print(f"\n  Selected: {model_id} (provider: {provider_name})\n")
 
+    # ── Step 3: Network policy ───────────────────────────────────────────
+    install_default = "deny"
+    runtime_default = "warn"
+    if non_interactive:
+        print(
+            f"\nNon-interactive mode: install allowlist=strict (deny), "
+            f"runtime monitoring=warn"
+        )
+    else:
+        print("\nStep 3 — Network authorization policy:\n")
+        print("  install allowlist enforces what install scripts can reach")
+        print("  runtime monitor watches gateway upstream calls\n")
+        raw = input("Use strict install allowlist (deny by default)? [Y/n]: ").strip().lower()
+        if raw in ("n", "no"):
+            install_default = "warn"
+        raw = input("Runtime default for unlisted hosts [warn/monitor/deny] (warn): ").strip().lower()
+        if raw in ("warn", "monitor", "deny"):
+            runtime_default = raw
+
     # Write results
-    print("Writing configuration...\n")
+    print("\nWriting configuration...\n")
     update_blueprint(project_dir, model_id)
+    update_network_policy(project_dir, install_default, runtime_default)
     update_dotenv(env_path, provider_name, model_id)
 
     print(f"\n=== Setup Complete ===")

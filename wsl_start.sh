@@ -2,7 +2,6 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_DIR="$PROJECT_DIR/src"
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 GATEWAY_PORT="${GATEWAY_PORT:-8090}"
 MODEL_ID="${MODEL_ID:-openrouter/stepfun/step-3.5-flash:free}"
@@ -20,8 +19,8 @@ fi
 if [[ ! -x "$VENV_PYTHON" ]]; then
   echo "Virtualenv Python not found at $VENV_PYTHON"
   echo "Create the venv in WSL first, then install dependencies:"
-  echo "  python3 -m venv .venv"
-  echo "  .venv/bin/pip install -r src/requirements.txt"
+  echo "  python3 -m venv --system-site-packages .venv"
+  echo "  .venv/bin/pip install -e ."
   exit 1
 fi
 
@@ -48,7 +47,7 @@ echo
 echo "[1/5] Starting security gateway..."
 mkdir -p "$PROJECT_DIR/logs"
 fuser -k "${GATEWAY_PORT}/tcp" 2>/dev/null || true
-nohup "$VENV_PYTHON" "$SRC_DIR/gateway.py" > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
+nohup "$VENV_PYTHON" -m guard.gateway > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 
 for _ in $(seq 1 20); do
@@ -61,7 +60,7 @@ done
 
 echo
 echo "[2/5] Preparing blueprint artifacts..."
-"$VENV_PYTHON" "$SRC_DIR/cli.py" onboard --workspace "$PROJECT_DIR" --gateway-port "$GATEWAY_PORT"
+"$VENV_PYTHON" -m guard onboard --workspace "$PROJECT_DIR" --gateway-port "$GATEWAY_PORT"
 POLICY_PATH="$PROJECT_DIR/nemoclaw-blueprint/policies/openclaw-sandbox.yaml"
 if [[ ! -s "$POLICY_PATH" ]]; then
   echo "Policy file is missing or empty: $POLICY_PATH"
