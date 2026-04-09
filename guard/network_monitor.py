@@ -1,11 +1,12 @@
 """
 NetworkMonitor — application-layer network authorization and audit.
 
-Reads `network.install` and `network.runtime` sections from blueprint.yaml,
-exposes `authorize(host, port, scope)` to other components (gateway upstream
-calls, install proxy, eBPF capture), and persists every decision into the
-shared `security_audit.db` SQLite database alongside the existing audit_log
-table.
+Reads `network.install` and `network.runtime` sections from the guard-owned
+``gateway.yaml`` (formerly inlined in ``nemoclaw-blueprint/blueprint.yaml``;
+see ``tools/migrate_blueprint_to_gateway.py``), exposes
+`authorize(host, port, scope)` to other components (gateway upstream calls,
+install proxy, eBPF capture), and persists every decision into the shared
+``security_audit.db`` SQLite database alongside the existing audit_log table.
 
 Design notes:
   * No new dependencies (stdlib + pyyaml, both already required by gateway).
@@ -149,10 +150,17 @@ def _normalize_default(value: Any) -> str:
 
 
 class NetworkMonitor:
-    """Singleton-style monitor; instantiate once via `get_default(...)`."""
+    """Singleton-style monitor; instantiate once via `get_default(...)`.
+
+    Note: the first positional argument is kept named ``blueprint_path`` for
+    backwards compatibility with existing call sites and tests, but the file
+    it points at is now ``gateway.yaml`` (the guard-owned config), not the
+    NemoClaw blueprint.
+    """
 
     def __init__(self, blueprint_path: Path | None, db_path: Path) -> None:
-        self.blueprint_path = blueprint_path
+        # Despite the legacy parameter name, this is the gateway.yaml path.
+        self.config_path = blueprint_path
         self.db_path = db_path
         self._lock = threading.Lock()
         self._install_entries: list[_Entry] = []
@@ -234,13 +242,13 @@ class NetworkMonitor:
 
     # ── Policy loading ─────────────────────────────────────────────────────
     def reload(self) -> None:
-        if not self.blueprint_path or not self.blueprint_path.exists():
-            log.info("No blueprint at %s; using defaults", self.blueprint_path)
+        if not self.config_path or not self.config_path.exists():
+            log.info("No gateway config at %s; using defaults", self.config_path)
             return
         try:
-            data = yaml.safe_load(self.blueprint_path.read_text(encoding="utf-8")) or {}
+            data = yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
         except Exception as exc:
-            log.warning("blueprint load failed: %s", exc)
+            log.warning("gateway config load failed: %s", exc)
             return
         net = data.get("network") or {}
         install = net.get("install") or {}
@@ -347,7 +355,7 @@ def get_default(blueprint_path: Path | None = None, db_path: Path | None = None)
             if db_path is None:
                 db_path = Path(__file__).parent.parent / "logs" / "security_audit.db"
             if blueprint_path is None:
-                blueprint_path = Path(__file__).parent.parent / "nemoclaw-blueprint" / "blueprint.yaml"
+                blueprint_path = Path(__file__).parent.parent / "gateway.yaml"
             _DEFAULT = NetworkMonitor(blueprint_path, db_path)
         return _DEFAULT
 

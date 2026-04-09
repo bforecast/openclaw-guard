@@ -4,7 +4,8 @@ OpenClaw Guard - Interactive Setup Wizard.
 Reads API keys from .env, tests provider connectivity, lets the user
 choose a provider then a model in two steps, and writes the result into:
   1. nemoclaw-blueprint/blueprint.yaml  (inference.profiles.default.model)
-  2. .env  (PROVIDER_ID=... and MODEL_ID=...)
+  2. gateway.yaml  (network.install.default and network.runtime.default)
+  3. .env  (PROVIDER_ID=... and MODEL_ID=...)
 
 Designed to run BEFORE gateway starts and BEFORE nemoclaw onboard.
 Embed in install_blueprint_ec2.sh as:
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import httpx
 
-from guard import blueprint_io
+from guard import blueprint_io, gateway_config
 
 # ── Provider / Model catalogue ───────────────────────────────────────────────
 
@@ -154,14 +155,14 @@ def update_network_policy(
     install_default: str,
     runtime_default: str,
 ) -> None:
-    """Patch blueprint.yaml `network.{install,runtime}.default` in place."""
-    bp_path = project_dir / "nemoclaw-blueprint" / "blueprint.yaml"
+    """Patch gateway.yaml `network.{install,runtime}.default` in place."""
+    gw_path = project_dir / "gateway.yaml"
     try:
-        blueprint_io.set_defaults(bp_path, install_default, runtime_default)
-    except blueprint_io.BlueprintError as exc:
+        gateway_config.set_defaults(gw_path, install_default, runtime_default)
+    except gateway_config.GatewayConfigError as exc:
         print(f"  WARN {exc}")
         return
-    print(f"  OK blueprint.yaml updated: network.install.default={install_default}, "
+    print(f"  OK gateway.yaml updated: network.install.default={install_default}, "
           f"network.runtime.default={runtime_default}")
 
 

@@ -23,6 +23,8 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from urllib.parse import urlparse
 
+from guard import gateway_config
+from guard.gateway_config import GatewayConfigError, McpServer
 from guard.network_monitor import BLOCK as NET_BLOCK, get_default as get_network_monitor
 
 PROVIDERS = {
@@ -103,11 +105,35 @@ else:
 LOG_DIR = Path(__file__).parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 DB_PATH = LOG_DIR / "security_audit.db"
-BLUEPRINT_PATH = Path(__file__).parent.parent / "nemoclaw-blueprint" / "blueprint.yaml"
+GATEWAY_CONFIG_PATH = Path(__file__).parent.parent / "gateway.yaml"
 
 # Initialize the shared NetworkMonitor early so the audit DB has both tables
 # (audit_log + network_events) before the first request lands.
-network_monitor = get_network_monitor(blueprint_path=BLUEPRINT_PATH, db_path=DB_PATH)
+network_monitor = get_network_monitor(blueprint_path=GATEWAY_CONFIG_PATH, db_path=DB_PATH)
+
+# In-memory MCP server cache, populated from gateway.yaml. Refreshed by
+# /v1/mcp/policy/reload and after every admin write so the proxy hot path
+# never re-parses YAML.
+_mcp_cache: dict[str, McpServer] = {}
+_mcp_cache_lock = asyncio.Lock()
+
+
+def _refresh_mcp_cache() -> None:
+    """Re-read mcp.servers from gateway.yaml into the in-memory cache."""
+    global _mcp_cache
+    try:
+        servers = gateway_config.list_servers(GATEWAY_CONFIG_PATH)
+    except GatewayConfigError as exc:
+        log.warning("mcp cache refresh failed: %s", exc)
+        return
+    _mcp_cache = {s.name: s for s in servers}
+
+
+# Hop-by-hop headers per RFC 7230 §6.1 — must NOT be forwarded by proxies.
+_HOP_BY_HOP = frozenset({
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+})
 
 DANGEROUS_PATTERNS = [
     r"\brm\s+-rf\b",
@@ -172,8 +198,62 @@ def _init_db() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mcp_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            server_name TEXT NOT NULL,
+            action TEXT NOT NULL,
+            decision TEXT,
+            reason TEXT,
+            actor TEXT,
+            upstream_host TEXT,
+            upstream_status INTEGER,
+            latency_ms INTEGER,
+            metadata TEXT
+        )
+        """
+    )
     conn.commit()
     return conn
+
+
+def _log_mcp_event(
+    server_name: str,
+    action: str,
+    *,
+    decision: str | None = None,
+    reason: str = "",
+    actor: str | None = None,
+    upstream_host: str | None = None,
+    upstream_status: int | None = None,
+    latency_ms: int | None = None,
+    metadata: dict | None = None,
+) -> None:
+    try:
+        conn = _init_db()
+        conn.execute(
+            "INSERT INTO mcp_events (timestamp, server_name, action, decision, "
+            "reason, actor, upstream_host, upstream_status, latency_ms, metadata) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                server_name,
+                action,
+                decision,
+                reason[:300] if reason else "",
+                actor,
+                upstream_host,
+                upstream_status,
+                latency_ms,
+                json.dumps(metadata) if metadata else None,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        log.warning("mcp_events write failed: %s", exc)
 
 
 def _log_event(provider: str, model: str, action: str, reason: str, preview: str) -> None:
@@ -543,6 +623,309 @@ async def reload_network_policy(request: Request):
         )
     network_monitor.reload()
     return {"status": "reloaded", "policy": network_monitor.policy_summary()}
+
+
+# ── MCP admin endpoints (source of truth for `guard mcp ...`) ──────────────
+def _auth_or_401(request: Request) -> JSONResponse | None:
+    if not _admin_token_ok(request):
+        return JSONResponse(
+            {"error": {"message": "admin token required", "type": "auth"}},
+            status_code=401,
+        )
+    return None
+
+
+def _mcp_error(message: str, status: int = 400) -> JSONResponse:
+    return JSONResponse({"error": {"message": message, "type": "mcp"}}, status_code=status)
+
+
+@app.on_event("startup")
+async def _gateway_startup() -> None:
+    _refresh_mcp_cache()
+    _init_db().close()  # ensure mcp_events table exists
+
+
+@app.get("/v1/mcp/servers")
+async def mcp_list_servers(request: Request):
+    err = _auth_or_401(request)
+    if err is not None:
+        return err
+    return [s.to_dict() for s in _mcp_cache.values()]
+
+
+@app.post("/v1/mcp/servers")
+async def mcp_register_server(request: Request):
+    err = _auth_or_401(request)
+    if err is not None:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return _mcp_error("invalid JSON body")
+    name = str(body.get("name", "")).strip()
+    url = str(body.get("url", "")).strip()
+    transport = str(body.get("transport", "sse")).strip()
+    credential_env = body.get("credential_env") or None
+    purpose = str(body.get("purpose", ""))
+    try:
+        async with _mcp_cache_lock:
+            srv = gateway_config.register_server(
+                GATEWAY_CONFIG_PATH,
+                name=name,
+                url=url,
+                transport=transport,
+                credential_env=credential_env,
+                purpose=purpose,
+            )
+            _refresh_mcp_cache()
+    except GatewayConfigError as exc:
+        msg = str(exc)
+        status = 409 if "already exists" in msg else 400
+        _log_mcp_event(name or "?", "register", decision="block", reason=msg)
+        return _mcp_error(msg, status=status)
+    _log_mcp_event(srv.name, "register", decision="allow",
+                   upstream_host=urlparse(srv.url).hostname or "")
+    return JSONResponse(srv.to_dict(), status_code=201)
+
+
+def _auto_allow_upstream(srv: McpServer) -> None:
+    """Add the MCP upstream host to network.runtime.allow so the existing
+    egress check stops blocking it. Best-effort: any failure is logged but
+    does not abort the approval flow."""
+    parsed = urlparse(srv.url)
+    host = parsed.hostname
+    if not host:
+        return
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        gateway_config.add_entry(
+            GATEWAY_CONFIG_PATH,
+            scope="runtime",
+            host=host,
+            ports=[port],
+            enforcement="enforce",
+            purpose=f"MCP {srv.name}",
+        )
+        network_monitor.reload()
+    except GatewayConfigError as exc:
+        log.warning("auto-allow for mcp %s failed: %s", srv.name, exc)
+
+
+@app.post("/v1/mcp/servers/{name}/approve")
+async def mcp_approve_server(name: str, request: Request):
+    err = _auth_or_401(request)
+    if err is not None:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    actor = str(body.get("actor", "")).strip()
+    if not actor:
+        return _mcp_error("actor is required")
+    auto_allow = bool(body.get("auto_allow", True))
+    try:
+        async with _mcp_cache_lock:
+            srv = gateway_config.set_server_status(
+                GATEWAY_CONFIG_PATH, name, "approved", actor=actor,
+            )
+            if auto_allow:
+                _auto_allow_upstream(srv)
+            _refresh_mcp_cache()
+    except GatewayConfigError as exc:
+        return _mcp_error(str(exc), status=404)
+    _log_mcp_event(srv.name, "approve", decision="allow", actor=actor,
+                   upstream_host=urlparse(srv.url).hostname or "")
+    return srv.to_dict()
+
+
+@app.post("/v1/mcp/servers/{name}/deny")
+async def mcp_deny_server(name: str, request: Request):
+    err = _auth_or_401(request)
+    if err is not None:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    actor = str(body.get("actor", "")).strip()
+    if not actor:
+        return _mcp_error("actor is required")
+    reason = str(body.get("reason", ""))
+    try:
+        async with _mcp_cache_lock:
+            srv = gateway_config.set_server_status(
+                GATEWAY_CONFIG_PATH, name, "denied", actor=actor, reason=reason,
+            )
+            _refresh_mcp_cache()
+    except GatewayConfigError as exc:
+        return _mcp_error(str(exc), status=404)
+    _log_mcp_event(srv.name, "deny", decision="block", actor=actor, reason=reason)
+    return srv.to_dict()
+
+
+@app.post("/v1/mcp/servers/{name}/revoke")
+async def mcp_revoke_server(name: str, request: Request):
+    err = _auth_or_401(request)
+    if err is not None:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    actor = str(body.get("actor", "")).strip()
+    if not actor:
+        return _mcp_error("actor is required")
+    reason = str(body.get("reason", ""))
+    try:
+        async with _mcp_cache_lock:
+            srv = gateway_config.set_server_status(
+                GATEWAY_CONFIG_PATH, name, "revoked", actor=actor, reason=reason,
+            )
+            _refresh_mcp_cache()
+    except GatewayConfigError as exc:
+        return _mcp_error(str(exc), status=404)
+    _log_mcp_event(srv.name, "revoke", decision="block", actor=actor, reason=reason)
+    return srv.to_dict()
+
+
+@app.delete("/v1/mcp/servers/{name}")
+async def mcp_remove_server(name: str, request: Request):
+    err = _auth_or_401(request)
+    if err is not None:
+        return err
+    async with _mcp_cache_lock:
+        removed = gateway_config.remove_server(GATEWAY_CONFIG_PATH, name)
+        _refresh_mcp_cache()
+    if not removed:
+        return _mcp_error(f"mcp server {name!r} not found", status=404)
+    _log_mcp_event(name, "remove", decision="allow")
+    return Response(status_code=204)
+
+
+@app.post("/v1/mcp/policy/reload")
+async def mcp_reload_policy(request: Request):
+    err = _auth_or_401(request)
+    if err is not None:
+        return err
+    async with _mcp_cache_lock:
+        _refresh_mcp_cache()
+    return {"status": "reloaded", "count": len(_mcp_cache)}
+
+
+@app.get("/v1/mcp/events")
+async def mcp_list_events(request: Request):
+    err = _auth_or_401(request)
+    if err is not None:
+        return err
+    try:
+        limit = int(request.query_params.get("limit", "100"))
+    except ValueError:
+        limit = 100
+    limit = max(1, min(limit, 1000))
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM mcp_events ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        log.warning("mcp_events read failed: %s", exc)
+        return []
+
+
+# ── MCP reverse proxy (sandbox-facing — no admin token) ────────────────────
+@app.api_route(
+    "/mcp/{server_name}/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+async def mcp_proxy(server_name: str, path: str, request: Request):
+    srv = _mcp_cache.get(server_name)
+    if srv is None:
+        return _mcp_error(f"mcp server {server_name!r} not found", status=404)
+    if srv.status != "approved":
+        reason = f"mcp server {server_name!r} status={srv.status}"
+        _log_mcp_event(server_name, "call", decision="block", reason=reason)
+        return _mcp_error(reason, status=403)
+
+    parsed = urlparse(srv.url)
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    decision = network_monitor.authorize(host, port, scope="runtime")
+    if decision.verdict == NET_BLOCK:
+        _log_mcp_event(
+            server_name, "call", decision="block", reason=decision.reason,
+            upstream_host=host,
+        )
+        return _mcp_error(f"network policy blocked: {decision.reason}", status=403)
+
+    # Build upstream URL: srv.url is treated as the base, then we append the
+    # tail path and query string from the incoming request.
+    base = srv.url.rstrip("/")
+    tail = f"/{path}" if path else ""
+    upstream_url = f"{base}{tail}"
+    if request.url.query:
+        upstream_url = f"{upstream_url}?{request.url.query}"
+
+    # Forward headers, dropping hop-by-hop and the inbound Authorization (we
+    # inject our own from credential_env if configured).
+    fwd_headers: dict[str, str] = {}
+    for k, v in request.headers.items():
+        kl = k.lower()
+        if kl in _HOP_BY_HOP or kl == "authorization":
+            continue
+        fwd_headers[k] = v
+    fwd_headers["host"] = parsed.netloc
+    if srv.credential_env:
+        token = os.environ.get(srv.credential_env, "")
+        if token:
+            fwd_headers["authorization"] = f"Bearer {token}"
+
+    body_bytes = await request.body()
+    started = datetime.now(timezone.utc)
+    client = httpx.AsyncClient(timeout=None)
+
+    try:
+        upstream_req = client.build_request(
+            request.method, upstream_url, headers=fwd_headers, content=body_bytes,
+        )
+        upstream_resp = await client.send(upstream_req, stream=True)
+    except Exception as exc:
+        await client.aclose()
+        _log_mcp_event(
+            server_name, "call", decision="block",
+            reason=f"upstream error: {exc}", upstream_host=host,
+        )
+        return _mcp_error(f"upstream error: {exc}", status=502)
+
+    latency_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    _log_mcp_event(
+        server_name, "call", decision="allow",
+        upstream_host=host, upstream_status=upstream_resp.status_code,
+        latency_ms=latency_ms,
+    )
+
+    resp_headers = {
+        k: v for k, v in upstream_resp.headers.items()
+        if k.lower() not in _HOP_BY_HOP
+    }
+
+    async def _stream():
+        try:
+            async for chunk in upstream_resp.aiter_raw():
+                yield chunk
+        finally:
+            await upstream_resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        _stream(),
+        status_code=upstream_resp.status_code,
+        headers=resp_headers,
+        media_type=upstream_resp.headers.get("content-type"),
+    )
 
 
 @app.get("/v1/models")

@@ -1,0 +1,127 @@
+version: 1
+network:
+  install:
+    default: deny
+    allow:
+    - host: github.com
+      ports:
+      - 443
+      purpose: NemoClaw source tarball
+    - host: codeload.github.com
+      ports:
+      - 443
+      purpose: GitHub tarball CDN
+    - host: objects.githubusercontent.com
+      ports:
+      - 443
+      purpose: GitHub release assets
+    - host: registry.npmjs.org
+      ports:
+      - 443
+      purpose: npm registry (NemoClaw deps)
+    - host: pypi.org
+      ports:
+      - 443
+      purpose: PyPI index
+    - host: files.pythonhosted.org
+      ports:
+      - 443
+      purpose: PyPI package files
+    - host: ghcr.io
+      ports:
+      - 443
+      purpose: GHCR sandbox base image
+    - host: registry-1.docker.io
+      ports:
+      - 443
+      purpose: Docker Hub registry
+    - host: auth.docker.io
+      ports:
+      - 443
+      purpose: Docker Hub auth
+    - host: production.cloudflare.docker.com
+      ports:
+      - 443
+      purpose: Docker Hub blob CDN
+    - host: raw.githubusercontent.com
+      ports:
+      - 443
+      purpose: nvm installer script + GitHub raw files
+    - host: nodejs.org
+      ports:
+      - 443
+      purpose: Node.js binary downloads (nvm)
+    - host: deb.nodesource.com
+      ports:
+      - 443
+      purpose: NodeSource apt repo
+    - host: npmjs.com
+      ports:
+      - 443
+      purpose: npm website / redirects
+    - host: api.npmjs.org
+      ports:
+      - 443
+      purpose: npm API
+    - host: storage.googleapis.com
+      ports:
+      - 443
+      purpose: nvm / node mirror (GCS)
+    - host: iojs.org
+      ports:
+      - 443
+      purpose: nvm Node.js legacy mirror (io.js CDN)
+    - host: apt.openai.com
+      ports:
+      - 443
+      purpose: OpenAI apt (if needed)
+    - host: archive.ubuntu.com
+      ports:
+      - 80
+      - 443
+      purpose: Ubuntu apt (fallback)
+    - host: security.ubuntu.com
+      ports:
+      - 80
+      - 443
+      purpose: Ubuntu security apt
+  runtime:
+    default: warn
+    allow:
+    - host: api.openai.com
+      ports:
+      - 443
+      enforcement: enforce
+      rate_limit:
+        rpm: 600
+    - host: api.anthropic.com
+      ports:
+      - 443
+      enforcement: enforce
+      rate_limit:
+        rpm: 600
+    - host: openrouter.ai
+      ports:
+      - 443
+      enforcement: enforce
+      rate_limit:
+        rpm: 600
+    - host: integrate.api.nvidia.com
+      ports:
+      - 443
+      enforcement: enforce
+      rate_limit:
+        rpm: 600
+    - host: inference.local
+      ports:
+      - 443
+      enforcement: enforce
+      purpose: OpenShell sandbox proxy hop
+    - host: openclaw.ai
+      ports:
+      - 443
+      enforcement: enforce
+    - host: docs.openclaw.ai
+      ports:
+      - 443
+      enforcement: enforce

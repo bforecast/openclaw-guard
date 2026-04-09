@@ -4,17 +4,19 @@ from pathlib import Path
 
 import typer
 
-from guard import blueprint_io
+from guard import gateway_config
 from guard.onboard import prepare_onboarding
 
 app = typer.Typer(help="OpenClaw Guard - Unbypassable Security Gateway CLI")
-net_app = typer.Typer(help="Manage blueprint network whitelist (install/runtime).")
+net_app = typer.Typer(help="Manage gateway network whitelist (install/runtime).")
 app.add_typer(net_app, name="net")
+mcp_app = typer.Typer(help="Manage MCP servers via the guard gateway HTTP API.")
+app.add_typer(mcp_app, name="mcp")
 
 
-def _blueprint_path() -> Path:
-    """Resolve blueprint.yaml relative to this file's project root."""
-    return Path(__file__).resolve().parent.parent / "nemoclaw-blueprint" / "blueprint.yaml"
+def _gateway_config_path() -> Path:
+    """Resolve gateway.yaml relative to this file's project root."""
+    return Path(__file__).resolve().parent.parent / "gateway.yaml"
 
 
 def _gateway_reload(gateway_url: str, token: str | None) -> None:
@@ -41,6 +43,55 @@ def _gateway_reload(gateway_url: str, token: str | None) -> None:
             "edit took effect on disk only",
             fg=typer.colors.YELLOW,
         )
+
+
+def _gateway_admin_request(
+    method: str,
+    path: str,
+    *,
+    gateway_url: str = "http://127.0.0.1:8090",
+    json: dict | None = None,
+    params: dict | None = None,
+) -> dict | list:
+    """Call an admin endpoint on the gateway. Fails loudly (typer.Exit) if the
+    gateway is unreachable or returns a non-2xx status. Used by `guard mcp ...`
+    commands which are pure HTTP wrappers — they NEVER touch gateway.yaml on
+    disk; the gateway is the source of truth."""
+    import httpx
+
+    token = os.environ.get("GUARD_ADMIN_TOKEN") or os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+    if not token:
+        typer.secho(
+            "ERROR: GUARD_ADMIN_TOKEN (or OPENCLAW_GATEWAY_TOKEN) is not set",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(2)
+
+    url = f"{gateway_url.rstrip('/')}{path}"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        resp = httpx.request(
+            method, url, headers=headers, json=json, params=params, timeout=10.0,
+        )
+    except Exception as exc:
+        typer.secho(f"ERROR: gateway not reachable at {gateway_url}: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(2) from exc
+
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+            detail = body.get("error") or body.get("detail") or body
+        except Exception:
+            detail = resp.text[:300]
+        typer.secho(f"ERROR: {method} {path} -> {resp.status_code}: {detail}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    if resp.status_code == 204 or not resp.content:
+        return {}
+    try:
+        return resp.json()
+    except Exception:
+        return {}
 
 # ---------------------------------------------------------------------------
 # All providers that we register. Each one points to our security gateway
@@ -240,11 +291,11 @@ def net_list(
     scope: str = typer.Option("runtime", help="install | runtime"),
 ):
     """Show all whitelist entries for a scope."""
-    bp = _blueprint_path()
+    gw = _gateway_config_path()
     try:
-        default = blueprint_io.get_default(bp, scope)
-        entries = blueprint_io.list_entries(bp, scope)
-    except blueprint_io.BlueprintError as exc:
+        default = gateway_config.get_default(gw, scope)
+        entries = gateway_config.list_entries(gw, scope)
+    except gateway_config.GatewayConfigError as exc:
         typer.secho(f"ERROR: {exc}", fg=typer.colors.RED)
         raise typer.Exit(1)
 
@@ -275,13 +326,13 @@ def net_add(
     no_reload: bool = typer.Option(False, "--no-reload", help="Skip gateway hot-reload"),
 ):
     """Add a hostname to the whitelist and hot-reload the gateway."""
-    bp = _blueprint_path()
+    gw = _gateway_config_path()
     try:
-        added = blueprint_io.add_entry(
-            bp, scope=scope, host=host, ports=port,
+        added = gateway_config.add_entry(
+            gw, scope=scope, host=host, ports=port,
             enforcement=enforcement, purpose=purpose, rpm=rpm,
         )
-    except blueprint_io.BlueprintError as exc:
+    except gateway_config.GatewayConfigError as exc:
         typer.secho(f"ERROR: {exc}", fg=typer.colors.RED)
         raise typer.Exit(1)
 
@@ -306,10 +357,10 @@ def net_remove(
     no_reload: bool = typer.Option(False, "--no-reload"),
 ):
     """Remove a hostname from the whitelist and hot-reload the gateway."""
-    bp = _blueprint_path()
+    gw = _gateway_config_path()
     try:
-        removed = blueprint_io.remove_entry(bp, scope=scope, host=host)
-    except blueprint_io.BlueprintError as exc:
+        removed = gateway_config.remove_entry(gw, scope=scope, host=host)
+    except gateway_config.GatewayConfigError as exc:
         typer.secho(f"ERROR: {exc}", fg=typer.colors.RED)
         raise typer.Exit(1)
 
@@ -330,7 +381,7 @@ def net_remove(
 def net_reload(
     gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
 ):
-    """Hot-reload the gateway's network policy from blueprint.yaml.
+    """Hot-reload the gateway's network policy from gateway.yaml.
 
     Note: this only refreshes gateway.py.  network_capture.py reloads its
     DNSForwardCache on its own TTL (default 300 s); restart its systemd unit
@@ -339,6 +390,145 @@ def net_reload(
     """
     token = os.environ.get("GUARD_ADMIN_TOKEN") or os.environ.get("OPENCLAW_GATEWAY_TOKEN")
     _gateway_reload(gateway_url, token)
+
+
+# ── mcp subcommands (HTTP-only thin wrappers) ───────────────────────────────
+def _print_mcp_row(s: dict) -> None:
+    typer.echo(
+        f"  {s.get('name','?'):<24} {s.get('status','?'):<10} "
+        f"{s.get('transport','?'):<16} {s.get('url','?')}"
+    )
+
+
+@mcp_app.command("list")
+def mcp_list(
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """List all registered MCP servers (queries the gateway)."""
+    data = _gateway_admin_request("GET", "/v1/mcp/servers", gateway_url=gateway_url)
+    servers = data if isinstance(data, list) else data.get("servers", [])
+    if not servers:
+        typer.echo("\nNo MCP servers registered.\n")
+        return
+    typer.echo(f"\nMCP servers ({len(servers)}):\n")
+    typer.echo(f"  {'NAME':<24} {'STATUS':<10} {'TRANSPORT':<16} URL")
+    typer.echo(f"  {'-' * 24} {'-' * 10} {'-' * 16} {'-' * 30}")
+    for srv in servers:
+        _print_mcp_row(srv)
+    typer.echo("")
+
+
+@mcp_app.command("register")
+def mcp_register(
+    name: str = typer.Argument(..., help="Unique slug, URL-safe (used in /mcp/<name>/...)"),
+    url: str = typer.Argument(..., help="Upstream MCP URL"),
+    transport: str = typer.Option("sse", "--transport", "-t", help="sse | streamable_http"),
+    credential_env: str = typer.Option(
+        None, "--credential-env",
+        help="Env var holding the upstream bearer token (injected by gateway)",
+    ),
+    purpose: str = typer.Option("", "--purpose", help="Free-text reason"),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Register a new MCP server in pending state."""
+    body = {"name": name, "url": url, "transport": transport, "purpose": purpose}
+    if credential_env:
+        body["credential_env"] = credential_env
+    data = _gateway_admin_request(
+        "POST", "/v1/mcp/servers", gateway_url=gateway_url, json=body,
+    )
+    typer.secho(f"   OK registered MCP server {name!r} (status=pending)", fg=typer.colors.GREEN)
+    if isinstance(data, dict) and data:
+        _print_mcp_row(data)
+
+
+@mcp_app.command("approve")
+def mcp_approve(
+    name: str = typer.Argument(...),
+    by: str = typer.Option(..., "--by", help="Operator login (recorded for audit)"),
+    no_auto_allow: bool = typer.Option(
+        False, "--no-auto-allow",
+        help="Do NOT auto-add the upstream host to network.runtime.allow",
+    ),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Approve an MCP server so the sandbox can call it."""
+    body = {"actor": by, "auto_allow": not no_auto_allow}
+    _gateway_admin_request(
+        "POST", f"/v1/mcp/servers/{name}/approve",
+        gateway_url=gateway_url, json=body,
+    )
+    typer.secho(f"   OK {name!r} approved by {by}", fg=typer.colors.GREEN)
+
+
+@mcp_app.command("deny")
+def mcp_deny(
+    name: str = typer.Argument(...),
+    by: str = typer.Option(..., "--by"),
+    reason: str = typer.Option("", "--reason"),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Deny a pending MCP server."""
+    _gateway_admin_request(
+        "POST", f"/v1/mcp/servers/{name}/deny",
+        gateway_url=gateway_url, json={"actor": by, "reason": reason},
+    )
+    typer.secho(f"   OK {name!r} denied by {by}", fg=typer.colors.YELLOW)
+
+
+@mcp_app.command("revoke")
+def mcp_revoke(
+    name: str = typer.Argument(...),
+    by: str = typer.Option(..., "--by"),
+    reason: str = typer.Option("", "--reason"),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Revoke an approved MCP server (subsequent calls will be blocked)."""
+    _gateway_admin_request(
+        "POST", f"/v1/mcp/servers/{name}/revoke",
+        gateway_url=gateway_url, json={"actor": by, "reason": reason},
+    )
+    typer.secho(f"   OK {name!r} revoked by {by}", fg=typer.colors.YELLOW)
+
+
+@mcp_app.command("remove")
+def mcp_remove(
+    name: str = typer.Argument(...),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Permanently delete an MCP server entry."""
+    _gateway_admin_request(
+        "DELETE", f"/v1/mcp/servers/{name}", gateway_url=gateway_url,
+    )
+    typer.secho(f"   OK {name!r} removed", fg=typer.colors.GREEN)
+
+
+@mcp_app.command("logs")
+def mcp_logs(
+    limit: int = typer.Option(50, "--limit", "-n"),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Show recent MCP audit events."""
+    data = _gateway_admin_request(
+        "GET", "/v1/mcp/events",
+        gateway_url=gateway_url, params={"limit": limit},
+    )
+    rows = data if isinstance(data, list) else data.get("events", [])
+    if not rows:
+        typer.echo("\nNo MCP events.\n")
+        return
+    typer.echo(f"\nMCP events ({len(rows)}):\n")
+    typer.echo(f"  {'TIMESTAMP':<27} {'SERVER':<20} {'ACTION':<10} {'DECISION':<8} ACTOR")
+    typer.echo(f"  {'-' * 27} {'-' * 20} {'-' * 10} {'-' * 8} {'-' * 12}")
+    for r in rows:
+        typer.echo(
+            f"  {(r.get('timestamp') or '')[:26]:<27} "
+            f"{(r.get('server_name') or '')[:20]:<20} "
+            f"{(r.get('action') or ''):<10} "
+            f"{(r.get('decision') or '-'):<8} "
+            f"{(r.get('actor') or '-')}"
+        )
+    typer.echo("")
 
 
 if __name__ == "__main__":
