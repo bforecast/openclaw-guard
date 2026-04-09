@@ -41,13 +41,13 @@ def get_host_ip() -> str:
 
 
 def _load_runtime_network_allow(workspace_path: Path) -> list[dict]:
-    """Read `network.runtime.allow` from blueprint.yaml so onboarding can mirror
+    """Read `network.runtime.allow` from gateway.yaml so onboarding can mirror
     the policy into the OpenShell-style network_policies. Returns [] if missing."""
-    bp_path = workspace_path / "nemoclaw-blueprint" / "blueprint.yaml"
-    if not bp_path.exists():
+    gw_path = workspace_path / "gateway.yaml"
+    if not gw_path.exists():
         return []
     try:
-        data = yaml.safe_load(bp_path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(gw_path.read_text(encoding="utf-8")) or {}
     except Exception:
         return []
     runtime = (data.get("network") or {}).get("runtime") or {}

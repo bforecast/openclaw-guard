@@ -64,7 +64,7 @@ fi
 # 启动 install-time 网络授权代理 + kernel 抓取
 echo "Starting install-time network proxy on 127.0.0.1:8091..."
 nohup "$PROJECT_DIR/.venv/bin/python" -m guard.install_proxy \
-    --blueprint "$PROJECT_DIR/nemoclaw-blueprint/blueprint.yaml" \
+    --config "$PROJECT_DIR/gateway.yaml" \
     --audit-db "$PROJECT_DIR/logs/security_audit.db" \
     > "$PROJECT_DIR/logs/install_proxy.log" 2>&1 &
 INSTALL_PROXY_PID=$!
@@ -72,7 +72,7 @@ trap '[ -n "${INSTALL_PROXY_PID:-}" ] && kill $INSTALL_PROXY_PID 2>/dev/null || 
 sleep 1
 
 nohup "$PROJECT_DIR/.venv/bin/python" -m guard.network_capture \
-    --blueprint "$PROJECT_DIR/nemoclaw-blueprint/blueprint.yaml" \
+    --config "$PROJECT_DIR/gateway.yaml" \
     --audit-db "$PROJECT_DIR/logs/security_audit.db" \
     > "$PROJECT_DIR/logs/network_capture.log" 2>&1 &
 

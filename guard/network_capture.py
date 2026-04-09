@@ -333,7 +333,8 @@ def run_ebpf(monitor: NetworkMonitor, watched_pids: set[int]) -> None:
 # ── Entrypoint ─────────────────────────────────────────────────────────────
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OpenClaw Guard kernel network capture daemon")
-    parser.add_argument("--blueprint", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Path to gateway.yaml (guard-owned config)")
     parser.add_argument("--audit-db", type=Path, default=None)
     parser.add_argument("--backend", choices=("auto", "ebpf", "ss"), default="auto")
     parser.add_argument("--log-level", default="INFO")
@@ -350,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             time.sleep(3600)
 
-    monitor = get_default(blueprint_path=args.blueprint, db_path=args.audit_db)
+    monitor = get_default(blueprint_path=args.config, db_path=args.audit_db)
     pids = discover_pids()
     log.info("watched pids: %s", sorted(pids) if pids else "<none discovered yet>")
 

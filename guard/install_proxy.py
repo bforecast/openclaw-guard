@@ -1,6 +1,6 @@
 """
 install_proxy — minimal HTTP/HTTPS forward proxy that enforces the
-`network.install` allowlist from blueprint.yaml during install scripts.
+`network.install` allowlist from gateway.yaml during install scripts.
 
 Behaviour
   * Listens on 127.0.0.1:8091 by default.
@@ -307,7 +307,8 @@ class InstallProxy:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OpenClaw Guard install-time network proxy")
-    parser.add_argument("--blueprint", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Path to gateway.yaml (guard-owned config)")
     parser.add_argument("--audit-db", type=Path, default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -319,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s [install-proxy] %(message)s",
     )
 
-    monitor = get_default(blueprint_path=args.blueprint, db_path=args.audit_db)
+    monitor = get_default(blueprint_path=args.config, db_path=args.audit_db)
     summary = monitor.policy_summary()
     log.info("policy: install default=%s entries=%d enforce=%d",
              summary["install"]["default"], summary["install"]["entries"],

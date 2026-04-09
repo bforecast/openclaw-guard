@@ -86,7 +86,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "[2b/4] Starting kernel network capture daemon..."
 nohup "$PROJECT_DIR/.venv/bin/python" -m guard.network_capture \
-    --blueprint "$PROJECT_DIR/nemoclaw-blueprint/blueprint.yaml" \
+    --config "$PROJECT_DIR/gateway.yaml" \
     --audit-db "$PROJECT_DIR/logs/security_audit.db" \
     > "$PROJECT_DIR/logs/network_capture.log" 2>&1 &
 NETWORK_CAPTURE_PID=$!
@@ -96,7 +96,7 @@ NETWORK_CAPTURE_PID=$!
 # ---------------------------------------------------------------------------
 echo "[2c/4] Starting install-time network proxy on 127.0.0.1:8091..."
 nohup "$PROJECT_DIR/.venv/bin/python" -m guard.install_proxy \
-    --blueprint "$PROJECT_DIR/nemoclaw-blueprint/blueprint.yaml" \
+    --config "$PROJECT_DIR/gateway.yaml" \
     --audit-db "$PROJECT_DIR/logs/security_audit.db" \
     > "$PROJECT_DIR/logs/install_proxy.log" 2>&1 &
 INSTALL_PROXY_PID=$!
@@ -230,7 +230,7 @@ Type=simple
 User=root
 WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=-$PROJECT_DIR/.env
-ExecStart=$PROJECT_DIR/.venv/bin/python -m guard.network_capture --blueprint $PROJECT_DIR/nemoclaw-blueprint/blueprint.yaml --audit-db $PROJECT_DIR/logs/security_audit.db
+ExecStart=$PROJECT_DIR/.venv/bin/python -m guard.network_capture --config $PROJECT_DIR/gateway.yaml --audit-db $PROJECT_DIR/logs/security_audit.db
 Restart=always
 RestartSec=5
 
