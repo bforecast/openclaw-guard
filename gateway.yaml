@@ -125,3 +125,10 @@ network:
       ports:
       - 443
       enforcement: enforce
+    - host: api.githubcopilot.com
+      ports:
+      - 443
+      enforcement: enforce
+      purpose: MCP github
+mcp:
+  servers: []
