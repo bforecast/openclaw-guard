@@ -1,6 +1,7 @@
 import os
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 import typer
 
@@ -12,6 +13,44 @@ net_app = typer.Typer(help="Manage gateway network whitelist (install/runtime)."
 app.add_typer(net_app, name="net")
 mcp_app = typer.Typer(help="Manage MCP servers via the guard gateway HTTP API.")
 app.add_typer(mcp_app, name="mcp")
+
+MCP_INSTALL_TEMPLATES = {
+    "github": {
+        "url": "https://api.githubcopilot.com/mcp/",
+        "transport": "streamable_http",
+        "credential_env_hint": "GITHUB_MCP_TOKEN",
+        "purpose": "GitHub MCP (repos, issues, PRs, code search)",
+        "allowlist_hosts": ["api.githubcopilot.com", "api.github.com"],
+    },
+    "slack": {
+        "url": "https://slack.mcp.run/sse",
+        "transport": "sse",
+        "credential_env_hint": "SLACK_MCP_TOKEN",
+        "purpose": "Slack MCP (channels, messages, users)",
+        "allowlist_hosts": ["slack.mcp.run"],
+    },
+    "linear": {
+        "url": "https://mcp.linear.app/sse",
+        "transport": "sse",
+        "credential_env_hint": "LINEAR_MCP_TOKEN",
+        "purpose": "Linear MCP (issues, projects, teams)",
+        "allowlist_hosts": ["mcp.linear.app"],
+    },
+    "brave-search": {
+        "url": "https://mcp.bravesearch.com/sse",
+        "transport": "sse",
+        "credential_env_hint": "BRAVE_API_KEY",
+        "purpose": "Brave Search MCP (web search, local search)",
+        "allowlist_hosts": ["mcp.bravesearch.com"],
+    },
+    "sentry": {
+        "url": "https://mcp.sentry.dev/sse",
+        "transport": "sse",
+        "credential_env_hint": "SENTRY_AUTH_TOKEN",
+        "purpose": "Sentry MCP (error tracking, issues, releases)",
+        "allowlist_hosts": ["mcp.sentry.dev"],
+    },
+}
 
 
 def _gateway_config_path() -> Path:
@@ -400,13 +439,74 @@ def _print_mcp_row(s: dict) -> None:
     )
 
 
+def _extract_mcp_servers(data: dict | list) -> list[dict]:
+    if isinstance(data, list):
+        return data
+    return data.get("servers", [])
+
+
+def _find_mcp_server(name: str, gateway_url: str) -> dict | None:
+    servers = _extract_mcp_servers(
+        _gateway_admin_request("GET", "/v1/mcp/servers", gateway_url=gateway_url)
+    )
+    for server in servers:
+        if server.get("name") == name:
+            return server
+    return None
+
+
+def _recent_mcp_events(name: str, gateway_url: str, limit: int = 20) -> list[dict]:
+    data = _gateway_admin_request(
+        "GET", "/v1/mcp/events", gateway_url=gateway_url, params={"limit": limit}
+    )
+    rows = data if isinstance(data, list) else data.get("events", [])
+    return [row for row in rows if row.get("server_name") == name]
+
+
+def _runtime_allowlist_hosts() -> set[str]:
+    gw = _gateway_config_path()
+    try:
+        return {entry.host for entry in gateway_config.list_entries(gw, "runtime")}
+    except gateway_config.GatewayConfigError:
+        return set()
+
+
+def _resolve_install_template(
+    name: str,
+    url: str | None,
+    transport: str | None,
+    purpose: str,
+    credential_env: str | None,
+) -> tuple[str, str, str, str | None, list[str]]:
+    """Return (url, transport, purpose, credential_env, allowlist_hosts)."""
+    template = MCP_INSTALL_TEMPLATES.get(name)
+    if template is None:
+        if not url:
+            typer.secho(
+                f"ERROR: no built-in install template for {name!r}; "
+                "please provide the upstream URL.\n"
+                f"Available templates: {', '.join(sorted(MCP_INSTALL_TEMPLATES))}",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(2)
+        return url, transport or "sse", purpose, credential_env, []
+
+    resolved_url = url or template["url"]
+    resolved_transport = transport or template["transport"]
+    resolved_purpose = purpose or template["purpose"]
+    resolved_cred = credential_env or template.get("credential_env_hint")
+    allowlist_hosts = template.get("allowlist_hosts", [])
+    return resolved_url, resolved_transport, resolved_purpose, resolved_cred, allowlist_hosts
+
+
 @mcp_app.command("list")
 def mcp_list(
     gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
 ):
     """List all registered MCP servers (queries the gateway)."""
-    data = _gateway_admin_request("GET", "/v1/mcp/servers", gateway_url=gateway_url)
-    servers = data if isinstance(data, list) else data.get("servers", [])
+    servers = _extract_mcp_servers(
+        _gateway_admin_request("GET", "/v1/mcp/servers", gateway_url=gateway_url)
+    )
     if not servers:
         typer.echo("\nNo MCP servers registered.\n")
         return
@@ -440,6 +540,202 @@ def mcp_register(
     typer.secho(f"   OK registered MCP server {name!r} (status=pending)", fg=typer.colors.GREEN)
     if isinstance(data, dict) and data:
         _print_mcp_row(data)
+
+
+def _compute_event_stats(events: list[dict]) -> dict:
+    """Compute summary stats from a list of MCP events."""
+    calls = [e for e in events if e.get("action") == "call"]
+    total = len(calls)
+    if total == 0:
+        return {"total_calls": 0}
+    allowed = sum(1 for e in calls if e.get("decision") == "allow")
+    blocked = sum(1 for e in calls if e.get("decision") in ("block", "deny"))
+    latencies = [e["latency_ms"] for e in calls if e.get("latency_ms") is not None]
+    avg_latency = round(sum(latencies) / len(latencies)) if latencies else None
+    error_count = sum(
+        1 for e in calls
+        if e.get("upstream_status") is not None and e["upstream_status"] >= 400
+    )
+    return {
+        "total_calls": total,
+        "allowed": allowed,
+        "blocked": blocked,
+        "error_count": error_count,
+        "avg_latency_ms": avg_latency,
+    }
+
+
+def _find_allowlist_entry(host: str) -> "gateway_config.NetEntry | None":
+    """Find the full allowlist entry for a host, or None."""
+    gw = _gateway_config_path()
+    try:
+        for entry in gateway_config.list_entries(gw, "runtime"):
+            if entry.host == host:
+                return entry
+    except gateway_config.GatewayConfigError:
+        pass
+    return None
+
+
+@mcp_app.command("status")
+def mcp_status(
+    name: str = typer.Argument(..., help="Registered MCP server name"),
+    event_limit: int = typer.Option(5, "--event-limit", help="How many recent events to show"),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Show one MCP server with approval, transport, URL, credential ref,
+    host allowlist details, and recent audit event summary."""
+    server = _find_mcp_server(name, gateway_url)
+    if not server:
+        typer.secho(f"ERROR: MCP server {name!r} not found", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    typer.echo("")
+    typer.echo(f"Name:           {server.get('name', '-')}")
+    typer.echo(f"Status:         {server.get('status', '-')}")
+    typer.echo(f"Transport:      {server.get('transport', '-')}")
+    typer.echo(f"URL:            {server.get('url', '-')}")
+
+    # ── host allowlist detail ─────────────────────────────────────────
+    upstream_host = urlparse(server.get("url", "")).hostname or "-"
+    entry = _find_allowlist_entry(upstream_host) if upstream_host != "-" else None
+    typer.echo(f"Upstream host:  {upstream_host}")
+    if entry:
+        ports = ",".join(str(p) for p in entry.ports) or "*"
+        enf = entry.enforcement or "(scope default)"
+        rpm = str(entry.rpm) if entry.rpm is not None else "-"
+        typer.echo(f"Runtime allow:  yes  ports={ports}  enforcement={enf}  rpm={rpm}")
+        if entry.purpose:
+            typer.echo(f"Allow purpose:  {entry.purpose}")
+    else:
+        typer.echo("Runtime allow:  no")
+
+    typer.echo(f"Credential env: {server.get('credential_env') or '-'}")
+    typer.echo(f"Purpose:        {server.get('purpose') or '-'}")
+    typer.echo(f"Registered at:  {server.get('registered_at') or '-'}")
+    typer.echo(f"Approved at:    {server.get('approved_at') or '-'}")
+    typer.echo(f"Approved by:    {server.get('approved_by') or '-'}")
+
+    # ── event stats summary ───────────────────────────────────────────
+    all_events = _recent_mcp_events(name, gateway_url, limit=max(event_limit, 1) * 4)
+    stats = _compute_event_stats(all_events)
+    typer.echo("")
+    if stats["total_calls"] > 0:
+        typer.echo("Event summary:")
+        typer.echo(f"  Total calls:    {stats['total_calls']}")
+        typer.echo(f"  Allowed:        {stats['allowed']}")
+        typer.echo(f"  Blocked:        {stats['blocked']}")
+        typer.echo(f"  Upstream errors: {stats['error_count']}")
+        if stats["avg_latency_ms"] is not None:
+            typer.echo(f"  Avg latency:    {stats['avg_latency_ms']}ms")
+        typer.echo("")
+
+    typer.echo("Recent events:")
+    if not all_events:
+        typer.echo("  - none")
+    else:
+        for event in all_events[:event_limit]:
+            action = event.get("action", "-")
+            decision = event.get("decision") or "-"
+            upstream_status = event.get("upstream_status")
+            latency_ms = event.get("latency_ms")
+            extras: list[str] = []
+            if upstream_status is not None:
+                extras.append(f"http={upstream_status}")
+            if latency_ms is not None:
+                extras.append(f"latency={latency_ms}ms")
+            extra_text = f" ({', '.join(extras)})" if extras else ""
+            typer.echo(f"  - {action} / {decision}{extra_text}")
+    typer.echo("")
+
+
+@mcp_app.command("templates")
+def mcp_templates():
+    """List available built-in MCP install templates."""
+    typer.echo(f"\nAvailable MCP templates ({len(MCP_INSTALL_TEMPLATES)}):\n")
+    typer.echo(f"  {'NAME':<16} {'TRANSPORT':<18} {'CREDENTIAL_ENV':<24} PURPOSE")
+    typer.echo(f"  {'-' * 16} {'-' * 18} {'-' * 24} {'-' * 30}")
+    for tname, tpl in MCP_INSTALL_TEMPLATES.items():
+        typer.echo(
+            f"  {tname:<16} {tpl['transport']:<18} "
+            f"{tpl.get('credential_env_hint', '-'):<24} {tpl['purpose']}"
+        )
+    typer.echo("\nUsage:  guard mcp install <template-name> --credential-env ENV --by ACTOR\n")
+
+
+@mcp_app.command("install")
+def mcp_install(
+    name: str = typer.Argument(..., help="Known MCP slug / registered name"),
+    url: str | None = typer.Argument(None, help="Upstream MCP URL (optional for known templates)"),
+    transport: str | None = typer.Option(None, "--transport", "-t", help="sse | streamable_http"),
+    credential_env: str | None = typer.Option(
+        None,
+        "--credential-env",
+        help="Env var holding the upstream bearer token (template default used if omitted)",
+    ),
+    purpose: str = typer.Option("", "--purpose", help="Free-text reason"),
+    by: str = typer.Option(..., "--by", help="Operator login (recorded for audit)"),
+    no_auto_allow: bool = typer.Option(
+        False, "--no-auto-allow",
+        help="Do NOT auto-add the upstream host to network.runtime.allow",
+    ),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Register and approve an MCP server in one step.
+
+    For known templates (github, slack, linear, brave-search, sentry),
+    URL, transport, and credential-env are pre-filled automatically.
+    Use 'guard mcp templates' to see available templates.
+    """
+    existing = _find_mcp_server(name, gateway_url)
+    if existing:
+        typer.secho(
+            f"ERROR: MCP server {name!r} already exists; use 'guard mcp status {name}' "
+            "or the lower-level admin commands.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+    resolved_url, resolved_transport, resolved_purpose, resolved_cred, allowlist_hosts = (
+        _resolve_install_template(name, url, transport, purpose, credential_env)
+    )
+
+    if not resolved_cred:
+        typer.secho(
+            "ERROR: --credential-env is required (no template default available)",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(2)
+
+    body = {
+        "name": name,
+        "url": resolved_url,
+        "transport": resolved_transport,
+        "purpose": resolved_purpose,
+        "credential_env": resolved_cred,
+    }
+
+    _gateway_admin_request(
+        "POST", "/v1/mcp/servers", gateway_url=gateway_url, json=body,
+    )
+    _gateway_admin_request(
+        "POST",
+        f"/v1/mcp/servers/{name}/approve",
+        gateway_url=gateway_url,
+        json={"actor": by, "auto_allow": not no_auto_allow},
+    )
+
+    typer.secho(
+        f"   OK installed MCP server {name!r} and approved it for use",
+        fg=typer.colors.GREEN,
+    )
+    if name in MCP_INSTALL_TEMPLATES:
+        typer.echo(f"   Template: {name} -> {resolved_url} ({resolved_transport})")
+        if resolved_cred and not credential_env:
+            typer.echo(f"   Credential env (from template): {resolved_cred}")
+    installed = _find_mcp_server(name, gateway_url)
+    if installed:
+        _print_mcp_row(installed)
 
 
 @mcp_app.command("approve")
@@ -501,6 +797,22 @@ def mcp_remove(
         "DELETE", f"/v1/mcp/servers/{name}", gateway_url=gateway_url,
     )
     typer.secho(f"   OK {name!r} removed", fg=typer.colors.GREEN)
+
+
+@mcp_app.command("uninstall")
+def mcp_uninstall(
+    name: str = typer.Argument(..., help="Registered MCP server name"),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Remove a registered MCP server using product-facing wording."""
+    server = _find_mcp_server(name, gateway_url)
+    if not server:
+        typer.secho(f"ERROR: MCP server {name!r} not found", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    _gateway_admin_request(
+        "DELETE", f"/v1/mcp/servers/{name}", gateway_url=gateway_url,
+    )
+    typer.secho(f"   OK uninstalled MCP server {name!r}", fg=typer.colors.GREEN)
 
 
 @mcp_app.command("logs")
