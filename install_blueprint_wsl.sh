@@ -92,7 +92,7 @@ echo "[2/4] Invoking official NVIDIA NemoClaw installer..."
 export NEMOCLAW_NON_INTERACTIVE=1
 export NEMOCLAW_PROVIDER="custom"
 export NEMOCLAW_ENDPOINT_URL="http://host.openshell.internal:8090/v1"
-export NEMOCLAW_MODEL="openrouter/stepfun/step-3.5-flash:free"
+export NEMOCLAW_MODEL="nvidia/nemotron-3-super-120b-a12b:free"
 export COMPATIBLE_API_KEY="guard-managed"
 export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
 unset NVIDIA_API_KEY 

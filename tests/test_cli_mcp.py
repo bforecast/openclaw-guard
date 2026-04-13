@@ -162,6 +162,7 @@ class CliMcpCommandTests(unittest.TestCase):
                     "GITHUB_MCP_TOKEN",
                     "--by",
                     "alice",
+                    "--no-sandbox-policy",
                 ],
             )
 
@@ -188,7 +189,7 @@ class CliMcpCommandTests(unittest.TestCase):
              patch("guard.cli._find_mcp_server", side_effect=fake_find):
             result = self.runner.invoke(
                 app,
-                ["mcp", "install", "linear", "--by", "bob"],
+                ["mcp", "install", "linear", "--by", "bob", "--no-sandbox-policy"],
             )
 
         self.assertEqual(result.exit_code, 0)
@@ -208,7 +209,8 @@ class CliMcpCommandTests(unittest.TestCase):
         with patch("guard.cli._find_mcp_server", side_effect=fake_find):
             result = self.runner.invoke(
                 app,
-                ["mcp", "install", "unknown-mcp", "--credential-env", "TOK", "--by", "alice"],
+                ["mcp", "install", "unknown-mcp", "--credential-env", "TOK", "--by", "alice",
+                 "--no-sandbox-policy"],
             )
 
         self.assertNotEqual(result.exit_code, 0)
@@ -230,7 +232,8 @@ class CliMcpCommandTests(unittest.TestCase):
         with patch("guard.cli._find_mcp_server", side_effect=fake_find), patch(
             "guard.cli._gateway_admin_request", side_effect=fake_request
         ):
-            result = self.runner.invoke(app, ["mcp", "uninstall", "github"])
+            result = self.runner.invoke(app, ["mcp", "uninstall", "github",
+                                              "--no-sandbox-policy"])
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("uninstalled MCP server 'github'", result.stdout)

@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 GATEWAY_PORT="${GATEWAY_PORT:-8090}"
-MODEL_ID="${MODEL_ID:-openrouter/stepfun/step-3.5-flash:free}"
+MODEL_ID="${MODEL_ID:-nvidia/nemotron-3-super-120b-a12b:free}"
 OPENSHELL_GATEWAY_NAME="${OPENSHELL_GATEWAY_NAME:-nemoclaw}"
 
 # NemoClaw installer places the CLI in ~/.local/bin by default.

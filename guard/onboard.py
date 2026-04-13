@@ -1,4 +1,5 @@
 import json
+import os
 import secrets
 import socket
 import subprocess
@@ -78,10 +79,12 @@ def _project_network_policies(allow_entries: list[dict]) -> dict:
                     "host": host,
                     "port": port,
                     "protocol": "rest",
-                    "enforcement": enforcement,
+                    "enforcement": "enforce",
                     "rules": [
                         {"allow": {"method": "GET", "path": "/**"}},
                         {"allow": {"method": "POST", "path": "/**"}},
+                        {"allow": {"method": "PUT", "path": "/**"}},
+                        {"allow": {"method": "DELETE", "path": "/**"}},
                     ],
                 }
                 for port in ports
@@ -113,6 +116,13 @@ def prepare_onboarding(
     agent_dir.mkdir(parents=True, exist_ok=True)
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
+    # The sandbox symlinks /sandbox/.openclaw/agents -> /sandbox/.openclaw-data/agents.
+    # Write auth artifacts to the rw data dir as well so they are visible at runtime.
+    data_agent_dir = stateful_openclaw_dir / "agents" / "main" / "agent"
+    data_sessions_dir = stateful_openclaw_dir / "agents" / "main" / "sessions"
+    data_agent_dir.mkdir(parents=True, exist_ok=True)
+    data_sessions_dir.mkdir(parents=True, exist_ok=True)
+
     host_ip = get_host_ip()
     gateway_url = f"http://{host_ip}:{gateway_port}/v1"
     gateway_token = secrets.token_hex(24)
@@ -129,9 +139,18 @@ def prepare_onboarding(
     )
     _write_policy(policy_path, extra_policies)
     _write_policy(blueprint_policy_path, extra_policies)
-    _write_openclaw_config(immutable_openclaw_dir / "openclaw.json", gateway_token)
+    mcp_servers = _build_mcp_servers_config(workspace_path, gateway_port=gateway_port)
+    _write_openclaw_config(
+        immutable_openclaw_dir / "openclaw.json",
+        gateway_token,
+        mcp_servers=mcp_servers,
+    )
     _write_auth_profiles(agent_dir / "auth-profiles.json")
     _write_sessions_file(sessions_dir / "sessions.json")
+
+    # Mirror into the rw data dir (symlink target inside the sandbox)
+    _write_auth_profiles(data_agent_dir / "auth-profiles.json")
+    _write_sessions_file(data_sessions_dir / "sessions.json")
 
     return OnboardingArtifacts(
         workspace_path=workspace_path,
@@ -239,7 +258,64 @@ def _write_policy(policy_path: Path, extra_network_policies: dict | None = None)
         yaml.safe_dump(policy_doc, handle, sort_keys=False)
 
 
-def _write_openclaw_config(output_path: Path, gateway_token: str) -> None:
+def _build_mcp_servers_config(
+    workspace_path: Path,
+    gateway_port: int = 8090,
+) -> dict:
+    """Read approved MCP servers from gateway.yaml, resolve tokens from env,
+    and return a dict suitable for ``openclaw.json``'s ``mcp.servers`` field.
+
+    Each entry is an OpenClaw 2026.4+ compatible MCP server definition.
+    The sandbox connects directly to the upstream MCP endpoint; the network
+    policy must allowlist each host (done automatically by ``_write_policy``
+    via the ``runtime.allow`` entries in ``gateway.yaml``).
+    """
+    gw_path = workspace_path / "gateway.yaml"
+    if not gw_path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(gw_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+    raw_servers = (data.get("mcp") or {}).get("servers") or []
+    if not isinstance(raw_servers, list):
+        return {}
+
+    mcp_servers: dict = {}
+    for srv in raw_servers:
+        if not isinstance(srv, dict):
+            continue
+        if srv.get("status") != "approved":
+            continue
+        name = srv.get("name")
+        url = srv.get("url")
+        if not name or not url:
+            continue
+
+        transport = srv.get("transport", "streamable_http")
+        # Normalize: gateway.yaml uses underscores, OpenClaw uses hyphens
+        oc_transport = transport.replace("_", "-")
+
+        entry: dict = {"type": "http", "transport": oc_transport, "url": url}
+
+        cred_env = srv.get("credential_env")
+        if cred_env:
+            token = os.environ.get(cred_env, "")
+            if token:
+                entry["headers"] = {"Authorization": f"Bearer {token}"}
+
+        mcp_servers[name] = entry
+
+    return mcp_servers
+
+
+def _write_openclaw_config(
+    output_path: Path,
+    gateway_token: str,
+    *,
+    mcp_servers: dict | None = None,
+) -> None:
     openclaw_json = {
         "commands": {
             "native": "auto",
@@ -255,6 +331,8 @@ def _write_openclaw_config(output_path: Path, gateway_token: str) -> None:
             "providers": {
                 "anthropic": {
                     "baseUrl": "https://inference.local/v1",
+                    "apiKey": "guard-managed",
+                    "request": {"allowPrivateNetwork": True},
                     "models": [
                         {"id": "claude-opus-4-6", "name": "claude-opus-4-6"},
                         {"id": "claude-3.5-sonnet", "name": "claude-3.5-sonnet"},
@@ -266,6 +344,8 @@ def _write_openclaw_config(output_path: Path, gateway_token: str) -> None:
                 },
                 "openai": {
                     "baseUrl": "https://inference.local/v1",
+                    "apiKey": "guard-managed",
+                    "request": {"allowPrivateNetwork": True},
                     "models": [
                         {"id": "gpt-4o", "name": "gpt-4o"},
                         {"id": "o1", "name": "o1"},
@@ -274,6 +354,8 @@ def _write_openclaw_config(output_path: Path, gateway_token: str) -> None:
                 },
                 "openrouter": {
                     "baseUrl": "https://inference.local/v1",
+                    "apiKey": "guard-managed",
+                    "request": {"allowPrivateNetwork": True},
                     "models": [
                         {"id": "openrouter/auto", "name": "openrouter/auto"},
                         {
@@ -294,6 +376,8 @@ def _write_openclaw_config(output_path: Path, gateway_token: str) -> None:
             }
         },
     }
+    if mcp_servers:
+        openclaw_json["mcp"] = {"servers": mcp_servers}
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(openclaw_json, handle, indent=2)
 
