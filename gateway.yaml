@@ -130,5 +130,10 @@ network:
       - 443
       enforcement: enforce
       purpose: MCP github
+    - host: fetch.mcp.wiki
+      ports:
+      - 443
+      enforcement: enforce
+      purpose: MCP fetch (web page to markdown)
 mcp:
   servers: []

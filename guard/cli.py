@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 import typer
 
-from guard import gateway_config
+from guard import gateway_config, sandbox_policy
 from guard.onboard import prepare_onboarding
 
 app = typer.Typer(help="OpenClaw Guard - Unbypassable Security Gateway CLI")
@@ -679,6 +679,13 @@ def mcp_install(
         False, "--no-auto-allow",
         help="Do NOT auto-add the upstream host to network.runtime.allow",
     ),
+    sandbox_name: str = typer.Option(
+        "my-assistant", "--sandbox", help="NemoClaw sandbox to apply network preset to",
+    ),
+    no_sandbox_policy: bool = typer.Option(
+        False, "--no-sandbox-policy",
+        help="Skip OpenShell sandbox policy update",
+    ),
     gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
 ):
     """Register and approve an MCP server in one step.
@@ -686,6 +693,10 @@ def mcp_install(
     For known templates (github, slack, linear, brave-search, sentry),
     URL, transport, and credential-env are pre-filled automatically.
     Use 'guard mcp templates' to see available templates.
+
+    After approval, Guard auto-generates an OpenShell network preset so the
+    sandbox can reach the MCP upstream host.  The user then runs
+    ``openclaw mcp add`` inside the sandbox to configure the MCP client.
     """
     existing = _find_mcp_server(name, gateway_url)
     if existing:
@@ -736,6 +747,30 @@ def mcp_install(
     installed = _find_mcp_server(name, gateway_url)
     if installed:
         _print_mcp_row(installed)
+
+    # ── Generate OpenShell sandbox preset and apply ──────────────────
+    if not no_sandbox_policy:
+        all_hosts = list(allowlist_hosts) if allowlist_hosts else []
+        url_hosts = sandbox_policy.hosts_from_url(resolved_url)
+        for h in url_hosts:
+            if h not in all_hosts:
+                all_hosts.append(h)
+
+        if all_hosts:
+            preset = sandbox_policy.generate_preset(
+                name,
+                description=f"MCP {name} upstream access",
+                hosts=all_hosts,
+            )
+            written = sandbox_policy.write_preset_file(name, preset)
+            for p in written:
+                typer.echo(f"   Preset: {p}")
+
+            ok, msg = sandbox_policy.apply_sandbox_policy(sandbox_name)
+            if ok:
+                typer.secho(f"   OK {msg}", fg=typer.colors.GREEN)
+            else:
+                typer.secho(f"   WARN {msg}", fg=typer.colors.YELLOW)
 
 
 @mcp_app.command("approve")
@@ -802,9 +837,16 @@ def mcp_remove(
 @mcp_app.command("uninstall")
 def mcp_uninstall(
     name: str = typer.Argument(..., help="Registered MCP server name"),
+    sandbox_name: str = typer.Option(
+        "my-assistant", "--sandbox", help="NemoClaw sandbox to update policy for",
+    ),
+    no_sandbox_policy: bool = typer.Option(
+        False, "--no-sandbox-policy",
+        help="Skip OpenShell sandbox policy update",
+    ),
     gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
 ):
-    """Remove a registered MCP server using product-facing wording."""
+    """Remove a registered MCP server and its sandbox network preset."""
     server = _find_mcp_server(name, gateway_url)
     if not server:
         typer.secho(f"ERROR: MCP server {name!r} not found", fg=typer.colors.RED)
@@ -813,6 +855,128 @@ def mcp_uninstall(
         "DELETE", f"/v1/mcp/servers/{name}", gateway_url=gateway_url,
     )
     typer.secho(f"   OK uninstalled MCP server {name!r}", fg=typer.colors.GREEN)
+
+    if not no_sandbox_policy:
+        removed = sandbox_policy.remove_preset_file(name)
+        for p in removed:
+            typer.echo(f"   Removed preset: {p}")
+
+        ok, msg = sandbox_policy.apply_sandbox_policy(sandbox_name)
+        if ok:
+            typer.secho(f"   OK {msg}", fg=typer.colors.GREEN)
+        else:
+            typer.secho(f"   WARN {msg}", fg=typer.colors.YELLOW)
+
+
+@mcp_app.command("sync")
+def mcp_sync(
+    sandbox_name: str = typer.Option(
+        "my-assistant", "--sandbox", help="NemoClaw sandbox name",
+    ),
+    workspace: str = typer.Option(
+        ".", "--workspace", help="Project root (contains gateway.yaml)",
+    ),
+    no_recreate: bool = typer.Option(
+        False, "--no-recreate",
+        help="Only regenerate openclaw.json; skip sandbox destroy+create",
+    ),
+    gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
+):
+    """Sync approved MCP servers (with tokens) into the sandbox.
+
+    Reads approved MCP servers from gateway.yaml, resolves credential tokens
+    from environment variables, and writes them into
+    ``sandbox_workspace/openclaw/openclaw.json`` as ``mcp.servers``.
+
+    Then destroys and recreates the sandbox so the new openclaw.json
+    takes effect (the file is read-only inside the sandbox).
+
+    Token security: the token is read from the host env at sync time and
+    written into openclaw.json.  Inside the sandbox this file is root-owned
+    and read-only.  The sandbox user can read it but cannot modify or
+    exfiltrate it (outbound network is policy-locked).
+
+    Example::
+
+        export GITHUB_MCP_TOKEN=ghp_xxx
+        guard mcp install github --by alice
+        guard mcp sync
+    """
+    from guard.onboard import _build_mcp_servers_config
+
+    workspace_path = Path(workspace).expanduser().resolve()
+    mcp_servers = _build_mcp_servers_config(workspace_path)
+
+    if not mcp_servers:
+        typer.secho("   No approved MCP servers with URLs in gateway.yaml", fg=typer.colors.YELLOW)
+        raise typer.Exit(0)
+
+    # Show what will be injected (mask tokens)
+    typer.echo(f"\nMCP servers to inject into sandbox {sandbox_name!r}:\n")
+    for name, cfg in mcp_servers.items():
+        has_token = "headers" in cfg and "Authorization" in cfg.get("headers", {})
+        token_status = "token OK" if has_token else "no token (user must provide in TUI)"
+        typer.echo(f"  {name:<20} {cfg['url']}")
+        typer.echo(f"  {'':20} {token_status}")
+    typer.echo("")
+
+    # Write updated openclaw.json
+    openclaw_dir = workspace_path / "sandbox_workspace" / "openclaw"
+    openclaw_json_path = openclaw_dir / "openclaw.json"
+
+    if not openclaw_json_path.exists():
+        typer.secho(
+            f"ERROR: {openclaw_json_path} not found; run 'guard onboard' first",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+    # Read existing, merge mcp.servers, write back
+    import json as json_mod
+    with openclaw_json_path.open("r", encoding="utf-8") as f:
+        existing = json_mod.load(f)
+    mcp_section = existing.setdefault("mcp", {})
+    mcp_section["servers"] = mcp_servers
+    with openclaw_json_path.open("w", encoding="utf-8") as f:
+        json_mod.dump(existing, f, indent=2)
+    typer.secho(f"   OK wrote mcp.servers to {openclaw_json_path}", fg=typer.colors.GREEN)
+
+    if no_recreate:
+        typer.echo("\n   --no-recreate: skipping sandbox destroy+create.")
+        typer.echo("   To apply, manually run:")
+        typer.echo(f"     nemoclaw {sandbox_name} destroy")
+        typer.echo(f"     nemoclaw {sandbox_name} connect  (auto-creates)")
+        return
+
+    # Destroy and recreate sandbox
+    typer.echo(f"\n   Recreating sandbox {sandbox_name!r} to apply new config...")
+    try:
+        subprocess.run(
+            ["nemoclaw", sandbox_name, "destroy"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError:
+        typer.secho("   WARN nemoclaw CLI not found; cannot recreate sandbox", fg=typer.colors.YELLOW)
+        typer.echo("   Manually run:")
+        typer.echo(f"     nemoclaw {sandbox_name} destroy")
+        typer.echo(f"     nemoclaw {sandbox_name} connect")
+        return
+    except subprocess.TimeoutExpired:
+        typer.secho("   WARN nemoclaw destroy timed out", fg=typer.colors.YELLOW)
+        return
+
+    typer.secho(f"   OK sandbox {sandbox_name!r} destroyed", fg=typer.colors.GREEN)
+
+    # Also apply sandbox network policy (with MCP presets)
+    ok, msg = sandbox_policy.apply_sandbox_policy(sandbox_name)
+    if ok:
+        typer.secho(f"   OK {msg}", fg=typer.colors.GREEN)
+    else:
+        # sandbox doesn't exist yet — policy will be applied when it's created
+        typer.echo(f"   Note: {msg}")
+
+    typer.echo(f"\n   Sandbox destroyed. Reconnect to create with new MCP config:")
+    typer.secho(f"     nemoclaw {sandbox_name} connect", fg=typer.colors.CYAN)
 
 
 @mcp_app.command("logs")

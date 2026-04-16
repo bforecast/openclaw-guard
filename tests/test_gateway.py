@@ -22,6 +22,23 @@ class ResolveProviderTests(unittest.TestCase):
         self.assertEqual(cleaned_model, "deepseek/deepseek-chat")
         self.assertEqual(provider_cfg["endpoint"], "/chat/completions")
 
+    def test_nvidia_model_routes_to_openrouter(self):
+        """nvidia/ prefixed models are free-tier on OpenRouter, not NVIDIA API."""
+        provider_name, _cfg, cleaned = gateway.resolve_provider(
+            "nvidia/nemotron-3-super-120b-a12b:free"
+        )
+        self.assertEqual(provider_name, "openrouter")
+
+    def test_org_prefixed_models_route_to_openrouter(self):
+        for model in [
+            "google/gemini-2.5-pro-preview",
+            "deepseek/deepseek-chat-v3",
+            "meta/llama-3.1-405b",
+            "anthropic/claude-opus-4-6",
+        ]:
+            provider_name, _, _ = gateway.resolve_provider(model)
+            self.assertEqual(provider_name, "openrouter", f"{model} should route to openrouter")
+
 
 class MessageScanningTests(unittest.TestCase):
     def test_extracts_text_from_structured_content(self):
@@ -75,7 +92,7 @@ class MessageScanningTests(unittest.TestCase):
     def test_chat_to_responses_payload_conversion(self):
         chat_payload = {
             "id": "chatcmpl_x",
-            "model": "openrouter/stepfun/step-3.5-flash:free",
+            "model": "nvidia/nemotron-3-super-120b-a12b:free",
             "choices": [{"message": {"role": "assistant", "content": "hello"}}],
             "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
         }

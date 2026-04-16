@@ -17,7 +17,7 @@ components:
         endpoint: http://host.openshell.internal:8090/v1
         credential_env: OPENCLAW_GATEWAY_TOKEN
         credential_default: guard-managed
-        model: openrouter/stepfun/step-3.5-flash:free
+        model: nvidia/nemotron-3-super-120b-a12b:free
   policy:
     base: nemoclaw-blueprint/policies/openclaw-sandbox.yaml
 mappings:

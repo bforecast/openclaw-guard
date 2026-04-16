@@ -31,7 +31,7 @@ PROVIDERS = {
         "auth_prefix": "Bearer ",
         "display": "OpenRouter (any model)",
         "default_models": [
-            "openrouter/stepfun/step-3.5-flash:free",
+            "nvidia/nemotron-3-super-120b-a12b:free",
             "openrouter/auto",
             "openrouter/google/gemini-2.5-pro-preview",
             "openrouter/deepseek/deepseek-chat-v3-0324:free",

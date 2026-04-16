@@ -72,11 +72,14 @@ PROVIDERS = {
 MODEL_ROUTES = [
     (r"^(gpt-|o1-|o3-|o4-|dall-e|tts-|whisper)", "openai"),
     (r"^claude-", "anthropic"),
-    (r"^openrouter/", "openrouter"),
-    (r"^(nvidia/|meta/|mistralai/|google/|microsoft/)", "nvidia"),
+    # Models with org/ prefix (nvidia/, meta/, google/, …) are hosted on
+    # OpenRouter as free-tier endpoints.  Route through OpenRouter so the
+    # gateway uses OPENROUTER_API_KEY rather than the NVIDIA direct API
+    # (which does not expose a standard /chat/completions surface).
+    (r"^(openrouter/|nvidia/|meta/|mistralai/|google/|microsoft/|deepseek/|anthropic/|openai/)", "openrouter"),
 ]
 
-DEFAULT_MODEL = os.environ.get("MODEL_ID", "openrouter/stepfun/step-3.5-flash:free")
+DEFAULT_MODEL = os.environ.get("MODEL_ID", "nvidia/nemotron-3-super-120b-a12b:free")
 
 
 def _infer_default_provider(model_id: str) -> str:
@@ -837,9 +840,16 @@ async def mcp_list_events(request: Request):
 
 
 # ── MCP reverse proxy (sandbox-facing — no admin token) ────────────────────
+# Two routes: /mcp/... (direct host access) and /v1/mcp/... (via inference.local
+# which OpenShell's proxy only allows under the /v1/ prefix).
 @app.api_route(
     "/mcp/{server_name}/{path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+@app.api_route(
+    "/v1/mcp/{server_name}/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    include_in_schema=False,
 )
 async def mcp_proxy(server_name: str, path: str, request: Request):
     srv = _mcp_cache.get(server_name)
