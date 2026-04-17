@@ -89,6 +89,8 @@ class CliMcpCommandTests(unittest.TestCase):
         # recent events still present
         self.assertIn("Recent events:", result.stdout)
         self.assertIn("call / allow (http=200, latency=42ms)", result.stdout)
+        self.assertIn("guard mcp sync --workspace . --sandbox my-assistant", result.stdout)
+        self.assertIn("openshell provider create --name github-mcp --type generic --credential GITHUB_MCP_TOKEN", result.stdout)
 
     def test_mcp_status_no_allowlist_entry(self):
         server = {
@@ -170,6 +172,8 @@ class CliMcpCommandTests(unittest.TestCase):
         self.assertIn("installed MCP server 'github' and approved it", result.stdout)
         self.assertEqual(calls[0][0:2], ("POST", "/v1/mcp/servers"))
         self.assertEqual(calls[1][0:2], ("POST", "/v1/mcp/servers/github/approve"))
+        self.assertIn("guard mcp sync --workspace . --sandbox my-assistant", result.stdout)
+        self.assertIn("openshell provider create --name github-mcp --type generic --credential GITHUB_MCP_TOKEN", result.stdout)
 
     def test_mcp_install_template_uses_defaults(self):
         """Install a known template without explicit URL or credential-env."""
@@ -195,11 +199,56 @@ class CliMcpCommandTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("installed MCP server 'linear'", result.stdout)
         self.assertIn("Template: linear", result.stdout)
+        self.assertIn("guard mcp sync --workspace . --sandbox my-assistant", result.stdout)
         # Verify register body used template defaults
         register_body = calls[0][2]["json"]
         self.assertEqual(register_body["url"], "https://mcp.linear.app/sse")
         self.assertEqual(register_body["transport"], "sse")
         self.assertEqual(register_body["credential_env"], "LINEAR_MCP_TOKEN")
+
+    def test_mcp_install_custom_public_server_allows_missing_credential_env(self):
+        calls = []
+
+        def fake_request(method, path, **kwargs):
+            calls.append((method, path, kwargs))
+            return {}
+
+        def fake_find(name, gateway_url):
+            if len(calls) < 2:
+                return None
+            return {
+                "name": name,
+                "status": "approved",
+                "transport": "streamable_http",
+                "url": "https://earnings.example.test/mcp",
+            }
+
+        with patch("guard.cli._gateway_admin_request", side_effect=fake_request), \
+             patch("guard.cli._find_mcp_server", side_effect=fake_find):
+            result = self.runner.invoke(
+                app,
+                [
+                    "mcp",
+                    "install",
+                    "earnings",
+                    "https://earnings.example.test/mcp",
+                    "--transport",
+                    "streamable_http",
+                    "--purpose",
+                    "Public earnings MCP",
+                    "--by",
+                    "alice",
+                    "--no-sandbox-policy",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("installed MCP server 'earnings' and approved it", result.stdout)
+        register_body = calls[0][2]["json"]
+        self.assertEqual(register_body["url"], "https://earnings.example.test/mcp")
+        self.assertEqual(register_body["transport"], "streamable_http")
+        self.assertNotIn("credential_env", register_body)
+        self.assertIn("No provider credential is required for this MCP server", result.stdout)
 
     def test_mcp_install_unknown_template_requires_url(self):
         """Unknown name without URL should fail with helpful message."""
@@ -250,5 +299,34 @@ class CliMcpCommandTests(unittest.TestCase):
         self.assertIn("CREDENTIAL_ENV", result.stdout)
 
 
+    def test_mcp_sync_stages_host_side_config(self):
+        approved_server = {
+            "name": "github",
+            "status": "approved",
+            "transport": "streamable_http",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "credential_env": "GITHUB_MCP_TOKEN",
+        }
+        staged = MagicMock()
+        staged.immutable_openclaw_dir = "D:/ag-projects/guard/sandbox_workspace/openclaw"
+        staged.policy_path = "D:/ag-projects/guard/policies/my-assistant.yaml"
+
+        with patch("guard.cli._gateway_admin_request", return_value=[approved_server]), \
+             patch("guard.cli.prepare_onboarding", return_value=staged):
+            result = self.runner.invoke(app, ["mcp", "sync", "--sandbox", "my-assistant"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("staged host-side OpenClaw config", result.stdout)
+        self.assertIn("Approved MCP servers for sandbox 'my-assistant':", result.stdout)
+        self.assertIn("transport=streamable-http", result.stdout)
+        self.assertIn("credential_env=GITHUB_MCP_TOKEN", result.stdout)
+        self.assertIn(
+            "Guard wrote the MCP registry into the host-side mapped OpenClaw config.",
+            result.stdout,
+        )
+        self.assertIn(
+            "Recreate the sandbox if it is already running so the refreshed config is mounted.",
+            result.stdout,
+        )
 if __name__ == "__main__":
     unittest.main()

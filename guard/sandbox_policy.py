@@ -52,8 +52,8 @@ def _endpoint_block(host: str, *, access_full: bool = True) -> dict:
 
 
 _DEFAULT_BINARIES = [
-    {"path": "/usr/bin/openclaw"},
-    {"path": "/usr/bin/node"},
+    {"path": "/usr/local/bin/openclaw"},
+    {"path": "/usr/local/bin/node"},
 ]
 
 

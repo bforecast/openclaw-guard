@@ -3,6 +3,7 @@ import os
 import secrets
 import socket
 import subprocess
+import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,28 +18,99 @@ class OnboardingArtifacts:
     policy_path: Path
     gateway_token: str
     gateway_url: str
-    host_ip: str
+    sandbox_host: str
 
 
-def get_host_ip() -> str:
-    """Resolve a host address that is usually reachable from Docker sandboxes."""
+def get_sandbox_host() -> str:
+    """Return the hostname that K3s sandbox pods use to reach the EC2 host.
+
+    NemoClaw registers 'host.openshell.internal' in K3s cluster DNS; it resolves
+    to the Docker bridge gateway regardless of which server we run on.
+    We use this instead of 'inference.local', which OpenClaw 2026.4+ blocks
+    via its SSRF guard.
+    """
+    return "host.openshell.internal"
+
+
+def _is_always_blocked_ip(value: ipaddress._BaseAddress) -> bool:
+    return value.is_loopback or value.is_link_local or value.is_unspecified
+
+
+def _parse_allowed_ip_values(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    values: list[str] = []
+    for part in raw.replace(";", ",").split(","):
+        item = part.strip()
+        if not item:
+            continue
+        try:
+            parsed = ipaddress.ip_address(item)
+        except ValueError:
+            continue
+        if _is_always_blocked_ip(parsed):
+            continue
+        values.append(str(parsed))
+    return list(dict.fromkeys(values))
+
+
+def _resolve_private_allowed_ips(host: str) -> list[str]:
     try:
-        result = subprocess.run(
-            ["hostname", "-I"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        first_ip = result.stdout.strip().split()[0]
-        if first_ip:
-            return first_ip
-    except Exception:
-        pass
+        parsed_host = ipaddress.ip_address(host)
+    except ValueError:
+        parsed_host = None
+    if parsed_host is not None:
+        if parsed_host.is_private and not _is_always_blocked_ip(parsed_host):
+            return [str(parsed_host)]
+        return []
 
+    resolved: list[str] = []
     try:
-        return socket.gethostbyname("host.docker.internal")
-    except Exception:
-        return "host.docker.internal"
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return []
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        raw_ip = sockaddr[0]
+        try:
+            parsed = ipaddress.ip_address(raw_ip)
+        except ValueError:
+            continue
+        if not parsed.is_private or _is_always_blocked_ip(parsed):
+            continue
+        resolved.append(str(parsed))
+    return list(dict.fromkeys(resolved))
+
+
+def _guard_bridge_allowed_ips(host: str) -> list[str]:
+    env_override = _parse_allowed_ip_values(os.environ.get("GUARD_BRIDGE_ALLOWED_IPS"))
+    if env_override:
+        return env_override
+    return _resolve_private_allowed_ips(host)
+
+
+def _network_endpoint(
+    host: str,
+    port: int,
+    *,
+    methods: list[str],
+    allowed_ips: list[str] | None = None,
+) -> dict:
+    endpoint = {
+        "host": host,
+        "port": port,
+        "protocol": "rest",
+        "enforcement": "enforce",
+        "rules": [
+            {"allow": {"method": method, "path": "/**"}}
+            for method in methods
+        ],
+    }
+    if allowed_ips:
+        endpoint["allowed_ips"] = list(allowed_ips)
+    return endpoint
 
 
 def _load_runtime_network_allow(workspace_path: Path) -> list[dict]:
@@ -71,22 +143,17 @@ def _project_network_policies(allow_entries: list[dict]) -> dict:
         if not ports:
             ports = [443]
         enforcement = entry.get("enforcement") or "enforce"
+        allowed_ips = _resolve_private_allowed_ips(host)
         key = host.replace(".", "_").replace("*", "any")
         policies[key] = {
             "name": entry.get("purpose") or f"Allow {host}",
             "endpoints": [
-                {
-                    "host": host,
-                    "port": port,
-                    "protocol": "rest",
-                    "enforcement": "enforce",
-                    "rules": [
-                        {"allow": {"method": "GET", "path": "/**"}},
-                        {"allow": {"method": "POST", "path": "/**"}},
-                        {"allow": {"method": "PUT", "path": "/**"}},
-                        {"allow": {"method": "DELETE", "path": "/**"}},
-                    ],
-                }
+                _network_endpoint(
+                    host,
+                    port,
+                    methods=["GET", "POST", "PUT", "DELETE"],
+                    allowed_ips=allowed_ips,
+                )
                 for port in ports
             ],
             "binaries": [
@@ -123,8 +190,8 @@ def prepare_onboarding(
     data_agent_dir.mkdir(parents=True, exist_ok=True)
     data_sessions_dir.mkdir(parents=True, exist_ok=True)
 
-    host_ip = get_host_ip()
-    gateway_url = f"http://{host_ip}:{gateway_port}/v1"
+    sandbox_host = get_sandbox_host()
+    gateway_url = f"http://{sandbox_host}:{gateway_port}/v1"
     gateway_token = secrets.token_hex(24)
 
     policy_dir = workspace_path / "policies"
@@ -137,8 +204,18 @@ def prepare_onboarding(
     extra_policies = _project_network_policies(
         _load_runtime_network_allow(workspace_path)
     )
-    _write_policy(policy_path, extra_policies)
-    _write_policy(blueprint_policy_path, extra_policies)
+    _write_policy(
+        policy_path,
+        extra_policies,
+        bridge_host=sandbox_host,
+        gateway_port=gateway_port,
+    )
+    _write_policy(
+        blueprint_policy_path,
+        extra_policies,
+        bridge_host=sandbox_host,
+        gateway_port=gateway_port,
+    )
     mcp_servers = _build_mcp_servers_config(workspace_path, gateway_port=gateway_port)
     _write_openclaw_config(
         immutable_openclaw_dir / "openclaw.json",
@@ -159,11 +236,19 @@ def prepare_onboarding(
         policy_path=policy_path,
         gateway_token=gateway_token,
         gateway_url=gateway_url,
-        host_ip=host_ip,
+        sandbox_host=sandbox_host,
     )
 
 
-def _write_policy(policy_path: Path, extra_network_policies: dict | None = None) -> None:
+def _write_policy(
+    policy_path: Path,
+    extra_network_policies: dict | None = None,
+    *,
+    bridge_host: str | None = None,
+    gateway_port: int = 8090,
+) -> None:
+    bridge_host = bridge_host or get_sandbox_host()
+    bridge_allowed_ips = _guard_bridge_allowed_ips(bridge_host)
     policy_doc = {
         "version": 1,
         "filesystem_policy": {
@@ -193,19 +278,27 @@ def _write_policy(policy_path: Path, extra_network_policies: dict | None = None)
             "run_as_group": "sandbox",
         },
         "network_policies": {
+            "guard_bridge_host": {
+                "name": "Guard host bridge",
+                "endpoints": [
+                    _network_endpoint(
+                        bridge_host,
+                        gateway_port,
+                        methods=["GET", "POST", "DELETE"],
+                        allowed_ips=bridge_allowed_ips,
+                    ),
+                ],
+                "binaries": [
+                    {"path": "/usr/local/bin/openclaw"},
+                    {"path": "/usr/local/bin/node"},
+                    {"path": "/usr/bin/python3"},
+                    {"path": "/usr/bin/curl"},
+                ],
+            },
             "inference_local": {
                 "name": "OpenShell inference.local proxy",
                 "endpoints": [
-                    {
-                        "host": "inference.local",
-                        "port": 443,
-                        "protocol": "rest",
-                        "enforcement": "enforce",
-                        "rules": [
-                            {"allow": {"method": "GET", "path": "/**"}},
-                            {"allow": {"method": "POST", "path": "/**"}},
-                        ],
-                    },
+                    _network_endpoint("inference.local", 443, methods=["GET", "POST"]),
                 ],
                 "binaries": [
                     {"path": "/usr/local/bin/openclaw"},
@@ -215,16 +308,7 @@ def _write_policy(policy_path: Path, extra_network_policies: dict | None = None)
             "openclaw_api": {
                 "name": "OpenClaw API",
                 "endpoints": [
-                    {
-                        "host": "openclaw.ai",
-                        "port": 443,
-                        "protocol": "rest",
-                        "enforcement": "enforce",
-                        "rules": [
-                            {"allow": {"method": "GET", "path": "/**"}},
-                            {"allow": {"method": "POST", "path": "/**"}},
-                        ],
-                    },
+                    _network_endpoint("openclaw.ai", 443, methods=["GET", "POST"]),
                 ],
                 "binaries": [
                     {"path": "/usr/local/bin/openclaw"},
@@ -234,15 +318,7 @@ def _write_policy(policy_path: Path, extra_network_policies: dict | None = None)
             "openclaw_docs": {
                 "name": "OpenClaw docs",
                 "endpoints": [
-                    {
-                        "host": "docs.openclaw.ai",
-                        "port": 443,
-                        "protocol": "rest",
-                        "enforcement": "enforce",
-                        "rules": [
-                            {"allow": {"method": "GET", "path": "/**"}},
-                        ],
-                    },
+                    _network_endpoint("docs.openclaw.ai", 443, methods=["GET"]),
                 ],
                 "binaries": [
                     {"path": "/usr/local/bin/openclaw"},
@@ -262,14 +338,21 @@ def _build_mcp_servers_config(
     workspace_path: Path,
     gateway_port: int = 8090,
 ) -> dict:
-    """Read approved MCP servers from gateway.yaml, resolve tokens from env,
-    and return a dict suitable for ``openclaw.json``'s ``mcp.servers`` field.
+    """Read approved MCP servers from gateway.yaml and return a dict suitable
+    for ``openclaw.json``'s ``mcp.servers`` field.
 
     Each entry is an OpenClaw 2026.4+ compatible MCP server definition.
     The sandbox connects directly to the upstream MCP endpoint; the network
     policy must allowlist each host (done automatically by ``_write_policy``
     via the ``runtime.allow`` entries in ``gateway.yaml``).
+
+    Credential-bearing servers are rendered with OpenShell placeholder refs
+    instead of resolved tokens. This keeps real secrets out of the generated
+    host-side config artifact and matches the supported "attach provider, then
+    rebuild sandbox" workflow.
     """
+    del gateway_port  # compatibility placeholder during migration
+
     gw_path = workspace_path / "gateway.yaml"
     if not gw_path.exists():
         return {}
@@ -301,9 +384,9 @@ def _build_mcp_servers_config(
 
         cred_env = srv.get("credential_env")
         if cred_env:
-            token = os.environ.get(cred_env, "")
-            if token:
-                entry["headers"] = {"Authorization": f"Bearer {token}"}
+            entry["headers"] = {
+                "Authorization": f"Bearer openshell:resolve:env:{cred_env}"
+            }
 
         mcp_servers[name] = entry
 

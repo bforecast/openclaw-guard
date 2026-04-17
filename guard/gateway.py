@@ -879,12 +879,18 @@ async def mcp_proxy(server_name: str, path: str, request: Request):
     if request.url.query:
         upstream_url = f"{upstream_url}?{request.url.query}"
 
-    # Forward headers, dropping hop-by-hop and the inbound Authorization (we
-    # inject our own from credential_env if configured).
+    # Forward headers, dropping hop-by-hop. Authorization is handled
+    # explicitly below so host-managed credentials can override it when
+    # configured, while client-supplied credentials can still pass through
+    # for public MCP servers that expect Basic/Bearer auth from the caller.
     fwd_headers: dict[str, str] = {}
+    inbound_authorization = None
     for k, v in request.headers.items():
         kl = k.lower()
-        if kl in _HOP_BY_HOP or kl == "authorization":
+        if kl in _HOP_BY_HOP:
+            continue
+        if kl == "authorization":
+            inbound_authorization = v
             continue
         fwd_headers[k] = v
     fwd_headers["host"] = parsed.netloc
@@ -892,6 +898,8 @@ async def mcp_proxy(server_name: str, path: str, request: Request):
         token = os.environ.get(srv.credential_env, "")
         if token:
             fwd_headers["authorization"] = f"Bearer {token}"
+    elif inbound_authorization:
+        fwd_headers["authorization"] = inbound_authorization
 
     body_bytes = await request.body()
     started = datetime.now(timezone.utc)

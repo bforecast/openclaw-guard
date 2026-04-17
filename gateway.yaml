@@ -71,10 +71,6 @@ network:
       ports:
       - 443
       purpose: nvm Node.js legacy mirror (io.js CDN)
-    - host: apt.openai.com
-      ports:
-      - 443
-      purpose: OpenAI apt (if needed)
     - host: archive.ubuntu.com
       ports:
       - 80
@@ -130,10 +126,6 @@ network:
       - 443
       enforcement: enforce
       purpose: MCP github
-    - host: fetch.mcp.wiki
-      ports:
-      - 443
-      enforcement: enforce
-      purpose: MCP fetch (web page to markdown)
+
 mcp:
   servers: []

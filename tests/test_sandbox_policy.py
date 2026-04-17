@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -27,7 +28,7 @@ class TestGeneratePreset(unittest.TestCase):
         self.assertNotIn("protocol", np["endpoints"][0])
         # default binaries
         self.assertEqual(len(np["binaries"]), 2)
-        self.assertEqual(np["binaries"][0]["path"], "/usr/bin/openclaw")
+        self.assertEqual(np["binaries"][0]["path"], "/usr/local/bin/openclaw")
 
     def test_rest_tls_mode(self):
         """access_full=False uses protocol: rest + tls: terminate."""
@@ -213,7 +214,7 @@ class TestApplySandboxPolicy(unittest.TestCase):
 class TestBuildMcpServersConfig(unittest.TestCase):
     """Tests for guard.onboard._build_mcp_servers_config()."""
 
-    def test_reads_approved_servers_with_tokens(self):
+    def test_reads_approved_servers_with_placeholder_secret_refs(self):
         from guard.onboard import _build_mcp_servers_config
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -245,18 +246,17 @@ class TestBuildMcpServersConfig(unittest.TestCase):
             with gw_path.open("w") as f:
                 yaml.dump(gw_data, f)
 
-            with patch.dict("os.environ", {"GITHUB_MCP_TOKEN": "ghp_test123"}):
-                result = _build_mcp_servers_config(Path(tmpdir))
+            result = _build_mcp_servers_config(Path(tmpdir))
 
         # approved servers included
         self.assertIn("github", result)
         self.assertIn("earnings", result)
         # denied server excluded
         self.assertNotIn("denied-one", result)
-        # github has token
+        # github uses an OpenShell placeholder ref instead of a resolved token
         self.assertEqual(
             result["github"]["headers"]["Authorization"],
-            "Bearer ghp_test123",
+            "Bearer openshell:resolve:env:GITHUB_MCP_TOKEN",
         )
         # earnings has no credential_env, so no headers
         self.assertNotIn("headers", result["earnings"])
@@ -273,7 +273,7 @@ class TestBuildMcpServersConfig(unittest.TestCase):
             result = _build_mcp_servers_config(Path(tmpdir))
         self.assertEqual(result, {})
 
-    def test_no_token_in_env(self):
+    def test_placeholder_header_is_present_without_env_resolution(self):
         from guard.onboard import _build_mcp_servers_config
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -293,11 +293,13 @@ class TestBuildMcpServersConfig(unittest.TestCase):
             with gw_path.open("w") as f:
                 yaml.dump(gw_data, f)
 
-            with patch.dict("os.environ", {}, clear=True):
-                result = _build_mcp_servers_config(Path(tmpdir))
+            result = _build_mcp_servers_config(Path(tmpdir))
 
         self.assertIn("github", result)
-        self.assertNotIn("headers", result["github"])
+        self.assertEqual(
+            result["github"]["headers"]["Authorization"],
+            "Bearer openshell:resolve:env:GITHUB_MCP_TOKEN",
+        )
 
 
 class TestWriteOpenclawConfigWithMcp(unittest.TestCase):
@@ -311,7 +313,7 @@ class TestWriteOpenclawConfigWithMcp(unittest.TestCase):
                     "type": "http",
                     "transport": "streamable-http",
                     "url": "https://api.githubcopilot.com/mcp/",
-                    "headers": {"Authorization": "Bearer test"},
+                    "headers": {"Authorization": "Bearer openshell:resolve:env:GITHUB_MCP_TOKEN"},
                 },
             }
             _write_openclaw_config(out, "dummy-token", mcp_servers=mcp)
@@ -325,7 +327,7 @@ class TestWriteOpenclawConfigWithMcp(unittest.TestCase):
             self.assertIn("github", data["mcp"]["servers"])
             self.assertEqual(
                 data["mcp"]["servers"]["github"]["headers"]["Authorization"],
-                "Bearer test",
+                "Bearer openshell:resolve:env:GITHUB_MCP_TOKEN",
             )
             self.assertEqual(
                 data["mcp"]["servers"]["github"]["transport"],
@@ -363,6 +365,75 @@ class TestWriteOpenclawConfigWithMcp(unittest.TestCase):
                     provider.get("request", {}).get("allowPrivateNetwork"),
                 )
                 self.assertEqual(provider.get("apiKey"), "guard-managed")
+
+
+class TestOnboardPolicy(unittest.TestCase):
+    def test_write_policy_includes_guard_bridge_rule(self):
+        from guard.onboard import _write_policy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "openclaw-sandbox.yaml"
+            _write_policy(out, bridge_host="bridge.example.com", gateway_port=18090)
+
+            data = yaml.safe_load(out.read_text(encoding="utf-8"))
+
+        self.assertIn("guard_bridge_host", data["network_policies"])
+        endpoint = data["network_policies"]["guard_bridge_host"]["endpoints"][0]
+        self.assertEqual(endpoint["host"], "bridge.example.com")
+        self.assertEqual(endpoint["port"], 18090)
+        self.assertNotIn("allowed_ips", endpoint)
+
+    def test_write_policy_uses_env_override_allowed_ips_for_bridge(self):
+        from guard.onboard import _write_policy
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {"GUARD_BRIDGE_ALLOWED_IPS": "172.17.0.1,127.0.0.1"},
+            clear=False,
+        ):
+            out = Path(tmpdir) / "openclaw-sandbox.yaml"
+            _write_policy(out, bridge_host="host.openshell.internal", gateway_port=8090)
+            data = yaml.safe_load(out.read_text(encoding="utf-8"))
+
+        endpoint = data["network_policies"]["guard_bridge_host"]["endpoints"][0]
+        self.assertEqual(endpoint["allowed_ips"], ["172.17.0.1"])
+
+    def test_project_network_policies_adds_allowed_ips_for_private_ip_host(self):
+        from guard.onboard import _project_network_policies
+
+        policies = _project_network_policies(
+            [
+                {
+                    "host": "172.31.12.246",
+                    "ports": [8090],
+                    "purpose": "Guard bridge",
+                }
+            ]
+        )
+
+        endpoint = policies["172_31_12_246"]["endpoints"][0]
+        self.assertEqual(endpoint["allowed_ips"], ["172.31.12.246"])
+
+    def test_bridge_allowed_ips_env_override_does_not_leak_to_runtime_allow_entries(self):
+        from guard.onboard import _project_network_policies
+
+        with patch.dict(
+            os.environ,
+            {"GUARD_BRIDGE_ALLOWED_IPS": "172.17.0.1"},
+            clear=False,
+        ):
+            policies = _project_network_policies(
+                [
+                    {
+                        "host": "172.31.12.246",
+                        "ports": [8090],
+                        "purpose": "Guard bridge",
+                    }
+                ]
+            )
+
+        endpoint = policies["172_31_12_246"]["endpoints"][0]
+        self.assertEqual(endpoint["allowed_ips"], ["172.31.12.246"])
 
 
 if __name__ == "__main__":

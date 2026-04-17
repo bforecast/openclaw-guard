@@ -152,6 +152,10 @@ if [ -d "$OFFICIAL_POLICIES" ]; then
 fi
 rsync -a --delete "$PROJECT_DIR/nemoclaw-blueprint/" "$NEMOCLAW_SRC/nemoclaw-blueprint/"
 
+# Default behavior: use the NemoClaw source tree's pinned OpenClaw baseline
+# (currently 2026.4.2). Only set OPENCLAW_VERSION when deliberately testing a
+# different compatible version.
+
 # 可选：覆盖 OpenClaw 版本 — 本地构建基础镜像替换 GHCR 预构建版本
 # 直接在 Dockerfile 注入 npm install 会导致镜像膨胀 +1.7GB（npm 缓存 + 双份 openclaw），
 # 因此改为本地构建 Dockerfile.base 并标记为 ghcr 镜像名，让 sandbox Dockerfile FROM 使用本地版本

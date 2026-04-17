@@ -1,6 +1,6 @@
 version: 0.1.0
 min_openshell_version: 0.0.19
-min_openclaw_version: 2026.3.11
+min_openclaw_version: 2026.4.2
 description: "Zero-Injection Blueprint for OpenClaw. \nOrchestrates secure inference\
   \ routing via a host-side auditable gateway.\n"
 components:
@@ -13,9 +13,9 @@ components:
     profiles:
       default:
         provider_type: openai
-        provider_name: guard-gateway
+        provider_name: guard
         endpoint: http://host.openshell.internal:8090/v1
-        credential_env: OPENCLAW_GATEWAY_TOKEN
+        credential_env: OPENROUTER_API_KEY
         credential_default: guard-managed
         model: nvidia/nemotron-3-super-120b-a12b:free
   policy:
