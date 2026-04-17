@@ -18,7 +18,10 @@ from guard import gateway, network_monitor as nm
 
 
 class _EchoHandler(BaseHTTPRequestHandler):
+    last_authorization = None
+
     def do_GET(self):  # noqa: N802
+        type(self).last_authorization = self.headers.get("Authorization")
         body = b"upstream-ok"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -27,6 +30,7 @@ class _EchoHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):  # noqa: N802
+        type(self).last_authorization = self.headers.get("Authorization")
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length) if length else b""
         self.send_response(200)
@@ -203,6 +207,20 @@ class McpProxyTests(unittest.TestCase):
         self.assertEqual(rm.status_code, 204)
         self.assertEqual(self.client.get("/mcp/echo/").status_code, 404)
 
+    def test_proxy_passes_through_inbound_authorization_when_no_credential_env(self):
+        _EchoHandler.last_authorization = None
+        self._register()
+        self._approve()
+        auth_header = "Basic ZGVtbzpkZW1v"
+
+        resp = self.client.post(
+            "/mcp/echo/",
+            headers={"Authorization": auth_header},
+            content=b"{}",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(_EchoHandler.last_authorization, auth_header)
 
 if __name__ == "__main__":
     unittest.main()

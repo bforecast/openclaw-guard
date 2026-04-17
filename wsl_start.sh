@@ -44,7 +44,7 @@ echo "Provider keys:"
 [[ -n "${OPENROUTER_API_KEY:-}" ]] && echo "  OK OpenRouter" || echo "  WARN OpenRouter not set"
 echo
 
-echo "[1/5] Starting security gateway..."
+echo "[1/6] Starting security gateway..."
 mkdir -p "$PROJECT_DIR/logs"
 fuser -k "${GATEWAY_PORT}/tcp" 2>/dev/null || true
 nohup "$VENV_PYTHON" -m guard.gateway > "$PROJECT_DIR/logs/gateway.log" 2>&1 &
@@ -59,7 +59,7 @@ for _ in $(seq 1 20); do
 done
 
 echo
-echo "[2/5] Preparing blueprint artifacts..."
+echo "[2/6] Preparing blueprint artifacts..."
 "$VENV_PYTHON" -m guard onboard --workspace "$PROJECT_DIR" --gateway-port "$GATEWAY_PORT"
 POLICY_PATH="$PROJECT_DIR/nemoclaw-blueprint/policies/openclaw-sandbox.yaml"
 if [[ ! -s "$POLICY_PATH" ]]; then
@@ -70,10 +70,10 @@ echo "  Policy file verified: $POLICY_PATH"
 head -n 8 "$POLICY_PATH"
 
 echo
-echo "[3/5] Resetting OpenShell gateway for NemoClaw onboarding..."
+echo "[3/6] Resetting OpenShell gateway for NemoClaw onboarding..."
 openshell gateway destroy --name openshell >/dev/null 2>&1 || true
 echo
-echo "[4/5] Running NemoClaw onboarding..."
+echo "[4/6] Running NemoClaw onboarding..."
 # Ensure the project blueprint is seen by the onboard command
 if [[ ! -f "blueprint.yaml" && -f "nemoclaw-blueprint/blueprint.yaml" ]]; then
   ln -sf "nemoclaw-blueprint/blueprint.yaml" .
@@ -91,16 +91,16 @@ else
 fi
 
 echo
-echo "[5/6] Switching OpenShell inference to guard-gateway..."
-OPENSHELL_GATEWAY="$OPENSHELL_GATEWAY_NAME" openshell provider delete guard-gateway >/dev/null 2>&1 || true
+echo "[5/6] Switching OpenShell inference to guard..."
+OPENSHELL_GATEWAY="$OPENSHELL_GATEWAY_NAME" openshell provider delete guard >/dev/null 2>&1 || true
 OPENSHELL_GATEWAY="$OPENSHELL_GATEWAY_NAME" openshell provider create \
-  --name guard-gateway \
+  --name guard \
   --type openai \
-  --credential OPENAI_API_KEY=guard-managed \
+  --credential OPENROUTER_API_KEY \
   --config OPENAI_BASE_URL="http://host.openshell.internal:${GATEWAY_PORT}/v1"
 
 OPENSHELL_GATEWAY="$OPENSHELL_GATEWAY_NAME" openshell inference set \
-  --provider guard-gateway \
+  --provider guard \
   --model "$MODEL_ID" \
   --no-verify
 OPENSHELL_GATEWAY="$OPENSHELL_GATEWAY_NAME" openshell inference get || true

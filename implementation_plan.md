@@ -658,7 +658,61 @@ Implementation implication:
 3. **Tokens in ro mount**: `openclaw.json` contains actual MCP tokens (resolved from env at onboard time). The file is read-only inside the sandbox but not encrypted. Future improvement: use a secret store or short-lived tokens.
 4. **Single sandbox**: `ec2_ubuntu_start.sh` assumes a single sandbox named `my-assistant`. Multi-sandbox support would require parameterization.
 
+---
 
+## 10. Current Progress Snapshot (2026-04-17)
 
+This section is the single-paragraph status entry for the latest iteration on branch `codex/native-mcp-bridge-path` ("Promote native MCP bridge workflow"). Prior architectural detail remains in sections 1-9; this snapshot only records what moved in the current sprint.
 
+### 10.1 Sprint outcome
+
+- OpenClaw `2026.4.2` on the normal NemoClaw install path is now a **validated native MCP runtime**. GitHub MCP was called live from inside the sandbox (`openclaw agent` returned `bforecast`; `openclaw tui` returned real repository data). No `openclaw.json` mutation is required for this path; staging a bundle under `sandbox_workspace/openclaw-data/extensions/guard-mcp-bundle/` is sufficient.
+- Guard's MCP management surface is productized:
+  - `guard mcp install|approve|deny|revoke|status|uninstall|logs` as thin wrappers over the gateway admin API.
+  - `guard bridge add|activate|render|render-openclaw-bundle|stage-openclaw-bundle|verify-runtime|detect-host-alias|print-sandbox-steps` for bridge state and sandbox-side consumption.
+  - `guard mcp install` for public MCP servers no longer requires `--credential-env`; validated against `earnings-mcp-server.brilliantforecast.workers.dev`.
+- `ec2_ubuntu_start.sh` is refocused on the base stack only: system pre-checks, Docker, venv, `.env` + `GUARD_ADMIN_TOKEN`, Guard Gateway, NemoClaw source install, final OpenShell inference route. Sandbox MCP bundle placement, bridge activation, and native rollout are deliberately removed from this script.
+- New `install_mcp_bridge.sh` owns MCP rollout. It activates saved bridge records (`--all` or named), auto-detects a sandbox-reachable host alias, stages the OpenClaw native bundle under the host-mapped extension root, prints sandbox-side next steps, and runs `guard bridge verify-runtime`. It accepts `GUARD_BRIDGE_HOST`/`GUARD_BRIDGE_PORT` env inputs plus per-flag overrides.
+- Bridge host alias policy is explicit: prefer an external bridge host/domain, then a validated private IP, and keep `host.openshell.internal` only as a compatibility fallback. `GUARD_BRIDGE_ALLOWED_IPS` is the install-time escape hatch for the OpenShell SSRF override when the bridge resolves to RFC1918 space; `ec2_ubuntu_start.sh` now auto-detects the local Docker bridge IP.
+- Documentation updated by codex in the same sprint: `implementation_plan.md` (sections 3, 6, 8, 9), `README.md` (architecture + MCP sections, Quick Start split with `install_mcp_bridge.sh`, OpenClaw 4.2 Native MCP section), `verification_checklist.md` (v8 through 2026-04-16, new Case 3 native bundle flow, PowerShell/EC2 lessons, Final Release Checklist).
+
+### 10.2 Component status
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Guard Gateway (`/health`, `/v1/responses`, `/v1/mcp/*`, `/v1/network/*`) | Stable | systemd-managed; 76/76 unit tests pass |
+| Inference route (sandbox -> inference.local -> Guard -> upstream) | Stable | OpenRouter verified; dangerous prompt returns 403 |
+| MCP control plane (`gateway.yaml` + admin API) | Stable | Registration, approval, revocation, event log |
+| MCP HTTP bridge (`/mcp/{server}`) | Stable (minimal) | Credential injection from host env |
+| OpenClaw 4.2 native bundle consumption | Validated | GitHub MCP `get_me`, `search_repositories`, TUI all OK |
+| `install_mcp_bridge.sh` rollout | Shipped | Replaces MCP steps previously embedded in `ec2_ubuntu_start.sh` |
+| Bridge alias detection | Shipped | `guard bridge detect-host-alias`, `--auto-detect-host-alias` |
+| Non-HTTP / stdio MCP transports | Not supported | Only HTTP/SSE/streamable_http upstreams are bridged today |
+| Sandbox-side bundle auto-enable | Manual | Staging is scripted; enabling inside the sandbox may still need an operator step in non-standard layouts |
+
+### 10.3 Working-tree state (uncommitted on `codex/native-mcp-bridge-path`)
+
+The following files have local modifications pending commit as part of this iteration:
+
+```
+gateway.yaml
+guard/gateway.py
+guard/sandbox_policy.py
+install_blueprint_ec2.sh
+install_blueprint_wsl.sh
+nemoclaw-blueprint/blueprint.yaml
+tests/test_cli_mcp.py
+tests/test_mcp_proxy.py
+wsl_start.sh
+```
+
+These changes are consistent with the sprint outcome above (MCP rollout split, native bundle promotion, allowlist adjustments, CLI test coverage).
+
+### 10.4 Next up
+
+1. Productize in-sandbox native-bundle enable for non-standard extension roots (beyond host-mapped staging).
+2. Multi-sandbox parameterization for `ec2_ubuntu_start.sh` and `install_mcp_bridge.sh`.
+3. Secret hardening for MCP credentials (short-lived tokens / secret store, avoiding plaintext env reads at proxy time).
+4. Optional `mcporter`-free sandbox schema validation to remove the last debug-only dependency from verification runs.
+5. Consider expanding the bridge executor beyond HTTP-family transports, tracking NemoClaw PR #565 as an architectural reference rather than a runtime dependency.
 
