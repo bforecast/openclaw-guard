@@ -165,6 +165,8 @@ if [[ "${#BRIDGES[@]}" -eq 0 ]]; then
   exit 0
 fi
 
+BUNDLE_OUTPUT_DIR="$WORKSPACE/sandbox_workspace/openclaw-data/extensions/$BUNDLE_PLUGIN_ID"
+
 echo "Activating MCP bridges for sandbox '$SANDBOX_NAME'..."
 for BRIDGE_NAME in "${BRIDGES[@]}"; do
   echo ""
@@ -202,70 +204,105 @@ for BRIDGE_NAME in "${BRIDGES[@]}"; do
     --gateway-port "$BRIDGE_PORT" \
     --plugin-id "$BUNDLE_PLUGIN_ID"
 
-  BUNDLE_OUTPUT_DIR="$WORKSPACE/sandbox_workspace/openclaw-data/extensions/$BUNDLE_PLUGIN_ID"
-  echo ""
-  echo "Staging native MCP bundle into host-mapped sandbox extension dir:"
-  "$VENV_PYTHON" -m guard.cli bridge stage-openclaw-bundle "$BRIDGE_NAME" \
-    --sandbox "$SANDBOX_NAME" \
-    --workspace "$WORKSPACE" \
-    --gateway-port "$BRIDGE_PORT" \
-    --plugin-id "$BUNDLE_PLUGIN_ID" \
-    --output-dir "$BUNDLE_OUTPUT_DIR"
-
-  # WSL + Docker Desktop: the sandbox runs inside a k3s cluster container
-  # whose PVC lives in a Docker volume, not on the WSL filesystem.  The
-  # host-side BUNDLE_OUTPUT_DIR is not visible inside the pod, so we copy
-  # the staged files into the Docker volume and restart the pod.
-  if grep -qi "microsoft" /proc/version 2>/dev/null && \
-     docker ps --format '{{.Names}}' 2>/dev/null | grep -q openshell-cluster; then
-    CLUSTER_VOL="openshell-cluster-$GATEWAY_NAME"
-    echo ""
-    echo "WSL/Docker Desktop: syncing bundle into k3s PVC ($CLUSTER_VOL)..."
-    PVC_ROOT=$(docker run --rm -v "${CLUSTER_VOL}:/cluster" alpine \
-      find /cluster/storage -maxdepth 1 -name "*${SANDBOX_NAME}*" -type d 2>/dev/null \
-      | head -n1)
-    if [[ -n "$PVC_ROOT" ]]; then
-      PVC_DEST="$PVC_ROOT/.openclaw-data/extensions/$BUNDLE_PLUGIN_ID"
-      docker run --rm \
-        -v "${CLUSTER_VOL}:/cluster" \
-        -v "${BUNDLE_OUTPUT_DIR}:/bundle:ro" \
-        alpine \
-        sh -c "mkdir -p \"${PVC_DEST}/.claude-plugin\" \
-               && cp /bundle/.mcp.json \"${PVC_DEST}/.mcp.json\" \
-               && cp /bundle/.claude-plugin/plugin.json \
-                    \"${PVC_DEST}/.claude-plugin/plugin.json\" \
-               && echo done" 2>&1
-      # Restart the sandbox pod so OpenClaw picks up the new bundle
-      POD=$(docker exec "openshell-cluster-${GATEWAY_NAME}" \
-              kubectl -n openshell get pods --no-headers 2>/dev/null \
-              | grep "^${SANDBOX_NAME} " | awk '{print $1}' | head -n1)
-      if [[ -n "$POD" ]]; then
-        echo "  Restarting pod $POD..."
-        docker exec "openshell-cluster-${GATEWAY_NAME}" \
-          kubectl -n openshell delete pod "$POD" 2>/dev/null || true
-      fi
-      echo "  OK bundle synced to PVC"
-    else
-      echo "  WARN: PVC for sandbox '$SANDBOX_NAME' not found in $CLUSTER_VOL"
-    fi
-  fi
-
   echo ""
   echo "Optional mcporter debug command:"
   "$VENV_PYTHON" -m guard.cli bridge render-mcporter-add "$BRIDGE_NAME" \
     --sandbox "$SANDBOX_NAME" \
     --workspace "$WORKSPACE" \
     --gateway-port "$BRIDGE_PORT"
+done
 
-  if [[ "$PRINT_SANDBOX_STEPS" -eq 1 ]]; then
-    echo ""
-    echo "Sandbox-side next steps (native MCP first):"
-    "$VENV_PYTHON" -m guard.cli bridge print-sandbox-steps \
-      --sandbox "$SANDBOX_NAME" \
-      --workspace "$WORKSPACE" \
-      --gateway-port "$BRIDGE_PORT"
+# ---------------------------------------------------------------------------
+# Combined bundle staging: stage each bridge into a temp dir, merge all
+# mcpServers entries into one .mcp.json, then deploy once.
+# This avoids pod restarts between bridges and keeps the bundle consistent.
+# ---------------------------------------------------------------------------
+echo ""
+echo "Staging combined native MCP bundle (${#BRIDGES[@]} bridge(s))..."
+MERGED_MCP='{"mcpServers":{}}'
+FIRST_STAGED=""
+for BRIDGE_NAME in "${BRIDGES[@]}"; do
+  TMPBUNDLE="$(mktemp -d)"
+  "$VENV_PYTHON" -m guard.cli bridge stage-openclaw-bundle "$BRIDGE_NAME" \
+    --sandbox "$SANDBOX_NAME" \
+    --workspace "$WORKSPACE" \
+    --gateway-port "$BRIDGE_PORT" \
+    --plugin-id "$BUNDLE_PLUGIN_ID" \
+    --output-dir "$TMPBUNDLE" 2>&1
+  # Merge this bridge's mcpServers into the running MERGED_MCP
+  MERGED_MCP="$("$VENV_PYTHON" -c "
+import json, pathlib, sys
+merged = json.loads('''$MERGED_MCP''')
+bridge = json.loads(pathlib.Path('$TMPBUNDLE/.mcp.json').read_text())
+merged['mcpServers'].update(bridge.get('mcpServers', {}))
+print(json.dumps(merged))
+")"
+  if [[ -z "$FIRST_STAGED" ]]; then
+    FIRST_STAGED="$TMPBUNDLE"
+  else
+    rm -rf "$TMPBUNDLE"
   fi
 done
+
+# Write the merged bundle to the final output dir
+mkdir -p "$BUNDLE_OUTPUT_DIR/.claude-plugin"
+cp "$FIRST_STAGED/.claude-plugin/plugin.json" "$BUNDLE_OUTPUT_DIR/.claude-plugin/plugin.json"
+"$VENV_PYTHON" -c "
+import json, pathlib
+pathlib.Path('$BUNDLE_OUTPUT_DIR/.mcp.json').write_text(
+    json.dumps(json.loads('''$MERGED_MCP'''), indent=2, sort_keys=True) + '\n'
+)
+"
+rm -rf "$FIRST_STAGED"
+echo "  Combined bundle written to: $BUNDLE_OUTPUT_DIR"
+echo "  Servers: $(echo "$MERGED_MCP" | "$VENV_PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(', '.join(sorted(d['mcpServers'])))")"
+
+# WSL + Docker Desktop: the sandbox runs inside a k3s cluster container
+# whose PVC lives in a Docker volume, not on the WSL filesystem.  The
+# host-side BUNDLE_OUTPUT_DIR is not visible inside the pod, so we copy
+# the staged files into the Docker volume and restart the pod once.
+if grep -qi "microsoft" /proc/version 2>/dev/null && \
+   docker ps --format '{{.Names}}' 2>/dev/null | grep -q openshell-cluster; then
+  CLUSTER_VOL="openshell-cluster-$GATEWAY_NAME"
+  echo ""
+  echo "WSL/Docker Desktop: syncing bundle into k3s PVC ($CLUSTER_VOL)..."
+  PVC_ROOT=$(docker run --rm -v "${CLUSTER_VOL}:/cluster" alpine \
+    find /cluster/storage -maxdepth 1 -name "*${SANDBOX_NAME}*" -type d 2>/dev/null \
+    | head -n1)
+  if [[ -n "$PVC_ROOT" ]]; then
+    PVC_DEST="$PVC_ROOT/.openclaw-data/extensions/$BUNDLE_PLUGIN_ID"
+    docker run --rm \
+      -v "${CLUSTER_VOL}:/cluster" \
+      -v "${BUNDLE_OUTPUT_DIR}:/bundle:ro" \
+      alpine \
+      sh -c "mkdir -p \"${PVC_DEST}/.claude-plugin\" \
+             && cp /bundle/.mcp.json \"${PVC_DEST}/.mcp.json\" \
+             && cp /bundle/.claude-plugin/plugin.json \
+                  \"${PVC_DEST}/.claude-plugin/plugin.json\" \
+             && echo done" 2>&1
+    # Restart the sandbox pod so OpenClaw picks up the new bundle
+    POD=$(docker exec "openshell-cluster-${GATEWAY_NAME}" \
+            kubectl -n openshell get pods --no-headers 2>/dev/null \
+            | grep "^${SANDBOX_NAME} " | awk '{print $1}' | head -n1)
+    if [[ -n "$POD" ]]; then
+      echo "  Restarting pod $POD..."
+      docker exec "openshell-cluster-${GATEWAY_NAME}" \
+        kubectl -n openshell delete pod "$POD" 2>/dev/null || true
+    fi
+    echo "  OK bundle synced to PVC"
+  else
+    echo "  WARN: PVC for sandbox '$SANDBOX_NAME' not found in $CLUSTER_VOL"
+  fi
+fi
+
+if [[ "$PRINT_SANDBOX_STEPS" -eq 1 ]]; then
+  echo ""
+  echo "Sandbox-side next steps (native MCP first):"
+  "$VENV_PYTHON" -m guard.cli bridge print-sandbox-steps \
+    --sandbox "$SANDBOX_NAME" \
+    --workspace "$WORKSPACE" \
+    --gateway-port "$BRIDGE_PORT"
+fi
 
 echo ""
 echo "Done. Base install stays separate; this script only handles MCP bridge rollout."

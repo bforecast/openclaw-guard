@@ -126,6 +126,11 @@ network:
       - 443
       enforcement: enforce
       purpose: MCP github
+    - host: earnings-mcp-server.brilliantforecast.workers.dev
+      ports:
+      - 443
+      enforcement: enforce
+      purpose: MCP earnings
 mcp:
   servers:
   - name: github
@@ -136,4 +141,12 @@ mcp:
     credential_env: GITHUB_MCP_TOKEN
     purpose: GitHub MCP (repos, issues, PRs, code search)
     approved_at: '2026-04-18T01:06:43.176277+00:00'
+    approved_by: admin
+  - name: earnings
+    url: https://earnings-mcp-server.brilliantforecast.workers.dev/mcp
+    transport: sse
+    status: approved
+    registered_at: '2026-04-18T12:00:00.000000+00:00'
+    purpose: Earnings MCP (financial earnings data)
+    approved_at: '2026-04-18T12:00:00.000000+00:00'
     approved_by: admin
