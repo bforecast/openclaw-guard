@@ -212,6 +212,44 @@ for BRIDGE_NAME in "${BRIDGES[@]}"; do
     --plugin-id "$BUNDLE_PLUGIN_ID" \
     --output-dir "$BUNDLE_OUTPUT_DIR"
 
+  # WSL + Docker Desktop: the sandbox runs inside a k3s cluster container
+  # whose PVC lives in a Docker volume, not on the WSL filesystem.  The
+  # host-side BUNDLE_OUTPUT_DIR is not visible inside the pod, so we copy
+  # the staged files into the Docker volume and restart the pod.
+  if grep -qi "microsoft" /proc/version 2>/dev/null && \
+     docker ps --format '{{.Names}}' 2>/dev/null | grep -q openshell-cluster; then
+    CLUSTER_VOL="openshell-cluster-$GATEWAY_NAME"
+    echo ""
+    echo "WSL/Docker Desktop: syncing bundle into k3s PVC ($CLUSTER_VOL)..."
+    PVC_ROOT=$(docker run --rm -v "${CLUSTER_VOL}:/cluster" alpine \
+      find /cluster/storage -maxdepth 1 -name "*${SANDBOX_NAME}*" -type d 2>/dev/null \
+      | head -n1)
+    if [[ -n "$PVC_ROOT" ]]; then
+      PVC_DEST="$PVC_ROOT/.openclaw-data/extensions/$BUNDLE_PLUGIN_ID"
+      docker run --rm \
+        -v "${CLUSTER_VOL}:/cluster" \
+        -v "${BUNDLE_OUTPUT_DIR}:/bundle:ro" \
+        alpine \
+        sh -c "mkdir -p \"${PVC_DEST}/.claude-plugin\" \
+               && cp /bundle/.mcp.json \"${PVC_DEST}/.mcp.json\" \
+               && cp /bundle/.claude-plugin/plugin.json \
+                    \"${PVC_DEST}/.claude-plugin/plugin.json\" \
+               && echo done" 2>&1
+      # Restart the sandbox pod so OpenClaw picks up the new bundle
+      POD=$(docker exec "openshell-cluster-${GATEWAY_NAME}" \
+              kubectl -n openshell get pods --no-headers 2>/dev/null \
+              | grep "^${SANDBOX_NAME} " | awk '{print $1}' | head -n1)
+      if [[ -n "$POD" ]]; then
+        echo "  Restarting pod $POD..."
+        docker exec "openshell-cluster-${GATEWAY_NAME}" \
+          kubectl -n openshell delete pod "$POD" 2>/dev/null || true
+      fi
+      echo "  OK bundle synced to PVC"
+    else
+      echo "  WARN: PVC for sandbox '$SANDBOX_NAME' not found in $CLUSTER_VOL"
+    fi
+  fi
+
   echo ""
   echo "Optional mcporter debug command:"
   "$VENV_PYTHON" -m guard.cli bridge render-mcporter-add "$BRIDGE_NAME" \
