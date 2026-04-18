@@ -48,11 +48,32 @@ detect_docker_bridge_ip() {
     printf '%s\n' "$GUARD_BRIDGE_ALLOWED_IPS"; return
   fi
   local ip=""
-  command -v ip >/dev/null 2>&1 && \
-    ip="$(ip -4 addr show docker0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1)"
-  if [[ -z "$ip" ]] && command -v docker >/dev/null 2>&1; then
-    ip="$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null | head -n1)"
+
+  # Universal: Docker's special "host-gateway" value resolves to the IP that
+  # containers use to reach the host — docker0 IP on Docker CE, Docker
+  # Desktop VM gateway (192.168.65.254) on Docker Desktop / WSL.
+  # Using --add-host forces the resolution without relying on DNS injection,
+  # and works before NemoClaw is installed (no cluster container required).
+  if command -v docker >/dev/null 2>&1; then
+    ip="$(docker run --rm --pull missing \
+            --add-host gateway-probe:host-gateway \
+            alpine \
+            sh -c 'getent ahostsv4 gateway-probe 2>/dev/null \
+                   | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -n1' \
+          2>/dev/null)"
   fi
+
+  # Fallback (post-install): probe from the running NemoClaw cluster container.
+  if [[ -z "$ip" ]] && command -v docker >/dev/null 2>&1; then
+    local cluster
+    cluster="$(docker ps --format '{{.Names}}' 2>/dev/null \
+               | grep openshell-cluster | head -n1)"
+    if [[ -n "$cluster" ]]; then
+      ip="$(docker exec "$cluster" getent ahostsv4 host.openshell.internal \
+            2>/dev/null | awk '{print $1}' | head -n1)"
+    fi
+  fi
+
   printf '%s\n' "$ip"
 }
 
@@ -155,12 +176,6 @@ if ! grep -q "host.openshell.internal" /etc/hosts; then
   echo "127.0.0.1 host.openshell.internal" | sudo tee -a /etc/hosts >/dev/null
 fi
 
-BRIDGE_ALLOWED_IPS="$(detect_docker_bridge_ip)"
-if [[ -n "$BRIDGE_ALLOWED_IPS" ]]; then
-  export GUARD_BRIDGE_ALLOWED_IPS="$BRIDGE_ALLOWED_IPS"
-  echo "  Guard bridge allowed IPs: $GUARD_BRIDGE_ALLOWED_IPS"
-fi
-
 for _ in {1..30}; do
   if curl -fs "http://127.0.0.1:$GATEWAY_PORT/health" >/dev/null 2>&1; then
     echo "  OK Gateway ready."; break
@@ -250,6 +265,32 @@ bash "$NEMOCLAW_SRC/scripts/install.sh"
 
 restore_keys
 trap - EXIT
+
+# Post-install: cluster container now exists — re-detect bridge IP and
+# apply a corrected policy so the sandbox can reach the Guard gateway.
+# On Docker Desktop (WSL), the k3s pods use 192.168.65.254 (Docker Desktop
+# host-gateway), which differs from docker0 (172.17.0.1) and can only be
+# reliably detected after the cluster container is running.
+echo "  Applying network policy with correct allowed_ips..."
+BRIDGE_IP="$(detect_docker_bridge_ip)"
+if [[ -n "$BRIDGE_IP" ]]; then
+  export GUARD_BRIDGE_ALLOWED_IPS="$BRIDGE_IP"
+  echo "  Bridge IP: $BRIDGE_IP"
+  "$VENV_PYTHON" -m guard.cli onboard \
+    --workspace "$PROJECT_DIR" \
+    --sandbox-name openclaw-sandbox \
+    --gateway-port "$GATEWAY_PORT"
+  SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+  if openshell policy set \
+      --policy "$PROJECT_DIR/policies/openclaw-sandbox.yaml" \
+      "$SANDBOX_NAME" --wait 2>&1; then
+    echo "  OK Policy updated: allowed_ips=[$BRIDGE_IP]"
+  else
+    echo "  WARN: openshell policy set failed — approve host.openshell.internal:$GATEWAY_PORT manually."
+  fi
+else
+  echo "  WARN: Bridge IP not detected — skipping policy update."
+fi
 
 # Reload PATH after install
 export NVM_DIR="$HOME/.nvm"

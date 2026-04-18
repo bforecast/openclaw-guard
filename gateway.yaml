@@ -126,6 +126,14 @@ network:
       - 443
       enforcement: enforce
       purpose: MCP github
-
 mcp:
-  servers: []
+  servers:
+  - name: github
+    url: https://api.githubcopilot.com/mcp/
+    transport: streamable_http
+    status: approved
+    registered_at: '2026-04-18T01:06:42.762214+00:00'
+    credential_env: GITHUB_MCP_TOKEN
+    purpose: GitHub MCP (repos, issues, PRs, code search)
+    approved_at: '2026-04-18T01:06:43.176277+00:00'
+    approved_by: admin
