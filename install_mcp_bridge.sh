@@ -127,14 +127,13 @@ fi
 WORKSPACE="$(cd "$WORKSPACE" && pwd)"
 BRIDGE_STATE="$WORKSPACE/.guard/mcp-bridges.json"
 
-if [[ "$MODE" == "all" ]]; then
-  if [[ ! -f "$BRIDGE_STATE" ]]; then
-    echo "No bridge state found at $BRIDGE_STATE"
-    echo "Nothing to activate."
-    exit 0
-  fi
-
-  mapfile -t BRIDGES < <("$VENV_PYTHON" - <<'PY' "$BRIDGE_STATE" "$SANDBOX_NAME"
+# Read the complete list of registered bridges from state.  This is used for
+# the combined bundle staging (always merges all active bridges, regardless of
+# which names the user passed on the CLI — otherwise passing a single name
+# would shrink the bundle to just that one server and evict the others).
+ALL_BRIDGES=()
+if [[ -f "$BRIDGE_STATE" ]]; then
+  mapfile -t ALL_BRIDGES < <("$VENV_PYTHON" - <<'PY' "$BRIDGE_STATE" "$SANDBOX_NAME"
 import json
 import sys
 from pathlib import Path
@@ -160,12 +159,68 @@ PY
   )
 fi
 
+if [[ "$MODE" == "all" ]]; then
+  if [[ ! -f "$BRIDGE_STATE" ]]; then
+    echo "No bridge state found at $BRIDGE_STATE"
+    echo "Nothing to activate."
+    exit 0
+  fi
+  BRIDGES=("${ALL_BRIDGES[@]}")
+fi
+
 if [[ "${#BRIDGES[@]}" -eq 0 ]]; then
   echo "No MCP bridges selected for sandbox '$SANDBOX_NAME'."
   exit 0
 fi
 
+# Stage set is always every registered bridge — this is what ends up in the
+# combined bundle. User-supplied names only scope the activate/verify loop.
+STAGE_BRIDGES=("${ALL_BRIDGES[@]}")
+if [[ "${#STAGE_BRIDGES[@]}" -eq 0 ]]; then
+  STAGE_BRIDGES=("${BRIDGES[@]}")
+fi
+
 BUNDLE_OUTPUT_DIR="$WORKSPACE/sandbox_workspace/openclaw-data/extensions/$BUNDLE_PLUGIN_ID"
+
+# Fail fast if any selected bridge's upstream MCP server declares a
+# credential_env that is unset on the host.  Catches "forgot to source .env"
+# before we burn ~60s on activate/verify/stage only to have mcporter 401 in
+# the sandbox.
+MISSING_CREDS=$(
+  "$VENV_PYTHON" - "$GATEWAY_URL" "${BRIDGES[@]}" <<'PY'
+import json, os, sys, urllib.request
+gateway_url = sys.argv[1].rstrip('/')
+names = set(sys.argv[2:])
+token = os.environ.get("GUARD_ADMIN_TOKEN") or os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+req = urllib.request.Request(f"{gateway_url}/v1/mcp/servers")
+if token:
+    req.add_header("Authorization", f"Bearer {token}")
+try:
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+except Exception:
+    sys.exit(0)  # activate will surface real error
+servers = payload.get("servers") if isinstance(payload, dict) else payload
+for server in servers or []:
+    name = server.get("name")
+    if name not in names:
+        continue
+    cred_env = server.get("credential_env") or ""
+    if cred_env and not os.environ.get(cred_env):
+        print(f"{name}:{cred_env}")
+PY
+)
+if [[ -n "$MISSING_CREDS" ]]; then
+  echo "ERROR: required credential env vars are unset on the host:"
+  while IFS= read -r line; do
+    name="${line%%:*}"
+    var="${line##*:}"
+    echo "  - bridge '$name' needs \$$var (from gateway.yaml credential_env)"
+  done <<< "$MISSING_CREDS"
+  echo ""
+  echo "Fix: set -a; source .env; set +a   (then rerun)"
+  exit 2
+fi
 
 echo "Activating MCP bridges for sandbox '$SANDBOX_NAME'..."
 for BRIDGE_NAME in "${BRIDGES[@]}"; do
@@ -218,10 +273,10 @@ done
 # This avoids pod restarts between bridges and keeps the bundle consistent.
 # ---------------------------------------------------------------------------
 echo ""
-echo "Staging combined native MCP bundle (${#BRIDGES[@]} bridge(s))..."
+echo "Staging combined native MCP bundle (${#STAGE_BRIDGES[@]} bridge(s) from state)..."
 MERGED_MCP='{"mcpServers":{}}'
 FIRST_STAGED=""
-for BRIDGE_NAME in "${BRIDGES[@]}"; do
+for BRIDGE_NAME in "${STAGE_BRIDGES[@]}"; do
   TMPBUNDLE="$(mktemp -d)"
   "$VENV_PYTHON" -m guard.cli bridge stage-openclaw-bundle "$BRIDGE_NAME" \
     --sandbox "$SANDBOX_NAME" \
@@ -257,11 +312,30 @@ rm -rf "$FIRST_STAGED"
 echo "  Combined bundle written to: $BUNDLE_OUTPUT_DIR"
 echo "  Servers: $(echo "$MERGED_MCP" | "$VENV_PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(', '.join(sorted(d['mcpServers'])))")"
 
+# Bundle-content hash guard: if the merged bundle is byte-for-byte identical
+# to the last successfully-synced one, skip the WSL PVC sync + pod restart.
+# This keeps idempotent reruns (e.g. "am I still in sync?") cheap and
+# avoids killing any openclaw TUI session inside the pod for no reason.
+BUNDLE_HASH_FILE="$BUNDLE_OUTPUT_DIR/.mcp.json.sha256"
+NEW_BUNDLE_HASH=$("$VENV_PYTHON" -c "
+import hashlib, pathlib
+print(hashlib.sha256(
+    pathlib.Path('$BUNDLE_OUTPUT_DIR/.mcp.json').read_bytes()
+).hexdigest())
+")
+SKIP_POD_RESTART=0
+if [[ -f "$BUNDLE_HASH_FILE" ]] \
+   && [[ "$(cat "$BUNDLE_HASH_FILE")" == "$NEW_BUNDLE_HASH" ]]; then
+  SKIP_POD_RESTART=1
+  echo "  Bundle unchanged (sha256 match); will skip PVC sync + pod restart."
+fi
+
 # WSL + Docker Desktop: the sandbox runs inside a k3s cluster container
 # whose PVC lives in a Docker volume, not on the WSL filesystem.  The
 # host-side BUNDLE_OUTPUT_DIR is not visible inside the pod, so we copy
 # the staged files into the Docker volume and restart the pod once.
-if grep -qi "microsoft" /proc/version 2>/dev/null && \
+if [[ "$SKIP_POD_RESTART" -eq 0 ]] && \
+   grep -qi "microsoft" /proc/version 2>/dev/null && \
    docker ps --format '{{.Names}}' 2>/dev/null | grep -q openshell-cluster; then
   CLUSTER_VOL="openshell-cluster-$GATEWAY_NAME"
   echo ""
@@ -290,6 +364,9 @@ if grep -qi "microsoft" /proc/version 2>/dev/null && \
         kubectl -n openshell delete pod "$POD" 2>/dev/null || true
     fi
     echo "  OK bundle synced to PVC"
+    # Record the synced bundle hash so a subsequent idempotent rerun can skip
+    # the PVC copy + pod restart.
+    echo "$NEW_BUNDLE_HASH" > "$BUNDLE_HASH_FILE"
   else
     echo "  WARN: PVC for sandbox '$SANDBOX_NAME' not found in $CLUSTER_VOL"
   fi

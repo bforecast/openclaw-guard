@@ -1389,6 +1389,16 @@ def bridge_activate(
         help="OpenShell gateway/group name used by openshell sandbox exec",
     ),
     gateway_port: int = typer.Option(8090, "--gateway-port", help="Guard gateway port"),
+    reuse_alias: bool = typer.Option(
+        True,
+        "--reuse-alias/--force-probe",
+        help=(
+            "When --auto-detect-host-alias is set and a previously probed "
+            "host_alias is already cached in bridge state, reuse it instead "
+            "of re-probing from the sandbox (~3–5s saved per bridge). Pass "
+            "--force-probe to always re-probe."
+        ),
+    ),
 ):
     """Activate the minimal bridge runtime using Guard gateway MCP proxy routes.
 
@@ -1422,6 +1432,17 @@ def bridge_activate(
         raise typer.Exit(1)
 
     updates: dict[str, object] = {}
+    if auto_detect_host_alias:
+        cached_alias = row.get("host_alias") if not host_alias else None
+        if reuse_alias and cached_alias:
+            typer.echo(
+                f"Reusing cached host alias from bridge state: {cached_alias}"
+            )
+            typer.echo(
+                "  (pass --force-probe to re-run the sandbox probe)"
+            )
+            host_alias = str(cached_alias)
+            auto_detect_host_alias = False
     if auto_detect_host_alias:
         candidates = []
         if host_alias:
