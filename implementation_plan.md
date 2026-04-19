@@ -60,42 +60,69 @@ flowchart TD
 ```mermaid
 flowchart TD
     subgraph Host [Host Node: WSL/EC2]
-        subgraph Layer1 [Layer 1: Security Gateway]
-            Gate[gateway.py\nInference proxy + MCP admin API]
-            AuditLog[(gateway.log / security_audit.db)]
-            GwCfg[gateway.yaml]
+        subgraph DataPlane [Data Plane - gateway.py, single uvicorn process on :8090]
+            Inference["Inference proxy\n/v1/chat/completions"]
+            Bridge["Bridge\n/mcp/{name}, /v1/mcp/{name}"]
+            AdminAPI["Admin API\n/v1/mcp/servers, /v1/network/*"]
         end
-        subgraph Layer2 [Layer 2: Guard Control Plane]
+        subgraph ControlPlane [Control Plane - CLI + config files]
             BP[nemoclaw-blueprint/blueprint.yaml]
             PolicyBP[policies/openclaw-sandbox.yaml]
-            Admin[guard mcp / guard bridge\napproval + planned bridge state]
+            GuardCLI["guard mcp / guard bridge\napproval + bridge state"]
+            GwCfg[gateway.yaml]
+        end
+        subgraph AuditSinks [Audit Sinks]
+            GwLog[(gateway.log\nstderr via nohup)]
+            NetEvents[(security_audit.db\nnetwork_events table)]
+            McpEvents[(security_audit.db\nmcp_events table)]
         end
     end
 
-    subgraph Runtime [Orchestration Runtime]
+    subgraph Orchestration [Orchestration Runtime]
         Nemo[NemoClaw Onboarder]
         OShell[OpenShell Control Plane]
     end
 
-    subgraph Layer3 [Layer 3: Isolated Sandbox]
-        subgraph SB [Sandbox Pod]
-            OC[OpenClaw Agent]
-            DNS[DNS Proxy: host.openshell.internal]
-        end
+    subgraph Workload [Workload - Isolated Sandbox Pod]
+        OC[OpenClaw Agent]
+        DNS[DNS Proxy: host.openshell.internal]
     end
 
-    GwCfg -->|approved MCP servers| Admin
+    %% Control plane configures data plane
+    GuardCLI --> AdminAPI
+    AdminAPI --> GwCfg
+    GwCfg -.read on start / reload.-> DataPlane
+
+    %% Orchestration provisions workload
     Nemo -->|Registers Provider| OShell
     Nemo -->|Sets Route| OShell
-    Nemo -->|Provisions| SB
+    Nemo -->|Provisions| Workload
 
+    %% Workload -> Data plane (both paths use port 8090)
     OC -.->|inference.local| DNS
-    DNS -.->|Port 8090| Gate
-    Gate -->|Pattern Filter| External[LLM Providers]
-    Gate --> AuditLog
-    OC -.->|bridged MCP path| Bridge[Host MCP Bridge Executor\nGuard gateway /mcp proxy]
-    Bridge -.-> MCPUpstream[MCP Upstream\nGitHub, Slack, etc.]
+    DNS -.->|Port 8090| Inference
+    OC -.->|Port 8090| Bridge
+
+    %% Data plane -> upstream
+    Inference -->|httpx, pattern filter| External[LLM Providers]
+    Bridge -->|httpx| MCPUpstream[MCP Upstream\nGitHub, context7, ...]
+
+    %% Audit writes (asymmetric - see table below diagram)
+    Inference -->|ALLOWED/BLOCKED + httpx log| GwLog
+    Inference -->|host/port/method/path/bytes/latency| NetEvents
+    Bridge -->|httpx log + uvicorn access only\nno business-level line| GwLog
+    Bridge -->|server_name/action/decision/latency\nno bytes/path| McpEvents
 ```
+
+**Audit coverage note** — the two data-plane routes do NOT write the same shape of audit. See table below for the current asymmetry:
+
+| Signal | Inference (`/v1/chat/completions`) | Bridge (`/mcp/{name}`) |
+|---|---|---|
+| `gateway.log` business line (`ALLOWED`/`BLOCKED`) | ✅ | ❌ (block case leaves no log line) |
+| `gateway.log` httpx outbound line | ✅ | ✅ |
+| `gateway.log` uvicorn inbound access | ✅ | ✅ |
+| `network_events` (host/port/method/path/bytes/latency) | ✅ | ❌ |
+| `mcp_events` (server_name/action/decision/actor) | ❌ | ✅ |
 
 ### Key Breakthroughs (v5-v8)
 1. **Validation Loop Resolution**: Mapping `host.openshell.internal` to `127.0.0.1` on the host side lets `nemoclaw onboard` validate the custom security gateway during installation.
@@ -444,17 +471,14 @@ flowchart TB
         BridgeCLI["guard bridge CLI"]
     end
 
-    subgraph Gateway["Guard Gateway (host:8090)"]
-        AdminAPI["MCP Admin API"]
+    subgraph Gateway["Guard Gateway (host:8090, single uvicorn process)"]
+        AdminAPI["MCP Admin API\n/v1/mcp/servers, /v1/network/*"]
+        Bridge["Bridge\n/mcp/{name}, /v1/mcp/{name}\n(same process as Admin API, not a separate service)"]
     end
 
     subgraph Config["Host Config"]
         GwYaml["gateway.yaml"]
-        BridgeState[".guard/mcp-bridges.json"]
-    end
-
-    subgraph Runtime["Runtime"]
-        Exec["Host MCP Bridge Executor (gateway /mcp proxy)"]
+        BridgeState[".guard/mcp-bridges.json\n(bridge = attachment record)"]
     end
 
     subgraph Upstream["MCP Upstreams"]
@@ -465,10 +489,10 @@ flowchart TB
     CLI --> AdminAPI
     BridgeCLI --> BridgeState
     AdminAPI --> GwYaml
-    GwYaml --> Exec
-    BridgeState --> Exec
-    Exec -.-> GH
-    Exec -.-> Other
+    GwYaml --> Bridge
+    BridgeState --> Bridge
+    Bridge -.-> GH
+    Bridge -.-> Other
 ```
 
 #### 8.4.2 Operational sequence
