@@ -1,84 +1,83 @@
-﻿# OpenClaw SECURE Guard: Comprehensive Implementation Plan
+# OpenClaw Guard — Implementation Plan
 
-This document outlines the strategic deployment of the OpenClaw AI agent within a security-hardened environment powered by **NVIDIA OpenShell** and **NemoClaw**. It tracks the evolution from the initial custom CLI design to the modern, 100% Blueprint-driven architecture, and now the Guard-owned config split plus MCP governance layer.
+Engineering reference for the Guard security layer around the NVIDIA OpenShell + NemoClaw + OpenClaw stack. Scope: what runs today, where the boundaries are, how to install and operate it.
+
+> **Target audience**: engineers onboarding to the codebase, operators running the stack on WSL/EC2. For decision history and superseded approaches see [Appendix A](#appendix-a-decision-log).
 
 ---
 
-## 1. Initial System Architecture (V1-V2)
-*This section reflects the original architecture, leveraging a custom Python CLI to drive OpenShell directly.*
+## 1. Cheat Sheet
+
+### 1.1 Pinned versions
+
+| Component | Version | Notes |
+|---|---|---|
+| OpenClaw | `2026.4.2` | Native HTTP-MCP capable; no `4.10` upgrade needed |
+| NemoClaw | source tarball from `~/.nemoclaw/source/` | Bypasses bootstrap temp-dir bug |
+| OpenShell CLI | `0.0.26+` | Provides the sandbox orchestration and egress hooks |
+| Python | 3.11+ | `.venv` at project root |
+
+### 1.2 Ports
+
+| Port | Bind | Who connects | Traffic |
+|---|---|---|---|
+| 8090 | `0.0.0.0` | Sandbox + host operator | Inference proxy + Bridge + Admin API (three route groups sharing one uvicorn process) |
+| 8091 | `127.0.0.1` | `curl`/`pip`/`npm` during install | `install_proxy.py` HTTP CONNECT splice — install phase only |
+
+### 1.3 Processes
+
+| Process | systemd unit | Lifecycle |
+|---|---|---|
+| `guard.gateway` (uvicorn) | `guard-gateway.service` | Long-running; auto-restart |
+| `network_capture.py` (eBPF / `ss` fallback) | `guard-network-capture.service` | Long-running; runs as `root` for `CAP_BPF` |
+| `install_proxy.py` | ephemeral (nohup, trap EXIT) | Install phase only |
+
+### 1.4 Key files
+
+| File | Owner | Purpose |
+|---|---|---|
+| `gateway.yaml` | Guard | `network.install` / `network.runtime` / `mcp.servers` |
+| `nemoclaw-blueprint/blueprint.yaml` | NemoClaw | Sandbox, inference profiles, mappings |
+| `.guard/mcp-bridges.json` | Guard | Per-sandbox bridge (MCP attachment) records |
+| `logs/gateway.log` | Guard | stderr of gateway process (business log + httpx + uvicorn access) |
+| `logs/security_audit.db` | Guard | SQLite — `network_events` + `mcp_events` tables |
+| `sandbox_workspace/openclaw-data/extensions/guard-mcp-bundle/.mcp.json` | Guard | Bundled sandbox-side MCP client config |
+
+### 1.5 Terminology
+
+- **Gateway** — the single `guard.gateway` uvicorn process on :8090. Three route groups: **Inference proxy** (`/v1/chat/completions`), **Bridge** (`/mcp/{name}`), **Admin API** (`/v1/mcp/servers`, `/v1/network/*`).
+- **Bridge** — the gateway's MCP reverse-proxy route plus the attachment record in `.guard/mcp-bridges.json`. Not a separate process or port; implemented on top of the same gateway. Legacy name kept in `guard bridge` CLI.
+- **Attachment** — synonym for bridge when referring to the state record.
+- **Bundle** — the merged sandbox-side `.mcp.json` written to `sandbox_workspace/openclaw-data/extensions/guard-mcp-bundle/`, shared across all attachments for one OpenClaw install.
+
+---
+
+## 2. Architecture
+
+### 2.1 Planes and data flow
 
 ```mermaid
 flowchart TD
-    subgraph WSL_Host [Windows 11 WSL-Ubuntu Host]
-        PyCLI[Custom Python CLI Manager]
-        LLM_Review[Python LLM Security Reviewer]
-        OShellCLI[OpenShell CLI & Engine]
-        HostFS[(Host FileSystem)]
-    end
-
-    subgraph OpenShell_Docker [Docker: OpenShell Env]
-        Gateway[OpenShell Egress & Inference Gateway]
-        subgraph Sandbox [OpenClaw Sandbox Container]
-            OpenClaw[OpenClaw AI Agent]
-        end
-    end
-
-    PyCLI -->|Generates YAML & Executes| OShellCLI
-    OShellCLI -->|Provisions & Configures| OpenShell_Docker
-    
-    OpenClaw -.->|LLM Calls Intercepted| Gateway
-    Gateway -->|Routes Native Inference| LLM_Review
-    LLM_Review -->|Approves & Forwards| External_LLM[External Providers]
-    
-    OpenClaw -.->|General Egress| Gateway
-    Gateway -->|YAML Policy Enforcement| Internet
-    
-    HostFS -.->|Mounted via Policy| Sandbox
-```
-
----
-
-## 2. Requirement Breakdown & Evolution
-
-### Requirement 1: Directory & External Access Management
-*   **Evolution**: Switched to **Zero-Injection**. All mounts are declared in the NemoClaw Blueprint. Host directories are mounted as **Read-Only** volumes by the orchestrator before the sandbox starts.
-
-### Requirement 2: Network & AI Model Connection Management
-*   **Evolution**: Inference routing is now a first-class citizen in the **NemoClaw Layer 2 Blueprint**. `inference.local` is enforced by OpenShell kernel rules (Layer 3) to prevent any network bypass.
-
-### Requirement 3: LLM Forwarding & Security Review
-*   **Evolution**: The `gateway.py` (Layer 1) remains the security arbiter. It handles pattern matching (e.g., blocking `rm -rf`) and upstream provider failover (e.g., 429 retries).
-
-### Requirement 4: Using NVIDIA OpenShell
-*   **Successfully Adopted.** OpenShell orchestrates the Docker containers and kernel-level Landlock/Egress policies.
-
----
-
-## 3. Current Effective Architecture (v8): Blueprint-Driven Inference + Guard MCP Compatibility Bridge
-*As of April 2026. Inference is stably proxied through the Guard Gateway. Sandbox-native MCP runtime delivery through mapped `openclaw.json` is no longer treated as a stable integration point. The current implemented minimum is a Guard-owned HTTP bridge built on the existing gateway `/mcp/{server}` reverse proxy, with future room to expand toward broader compatibility patterns inspired by NemoClaw PR #565.*
-
-```mermaid
-flowchart TD
-    subgraph Host [Host Node: WSL/EC2]
-        subgraph DataPlane [Data Plane - gateway.py, single uvicorn process on :8090]
+    subgraph Host [Host Node: WSL / EC2]
+        subgraph DataPlane [Data Plane - guard.gateway, single uvicorn process on :8090]
             Inference["Inference proxy\n/v1/chat/completions"]
             Bridge["Bridge\n/mcp/{name}, /v1/mcp/{name}"]
             AdminAPI["Admin API\n/v1/mcp/servers, /v1/network/*"]
         end
         subgraph ControlPlane [Control Plane - CLI + config files]
-            BP[nemoclaw-blueprint/blueprint.yaml]
-            PolicyBP[policies/openclaw-sandbox.yaml]
-            GuardCLI["guard mcp / guard bridge\napproval + bridge state"]
+            GuardCLI["guard mcp / guard bridge"]
             GwCfg[gateway.yaml]
+            BridgeState[.guard/mcp-bridges.json]
+            BP[nemoclaw-blueprint/blueprint.yaml]
         end
         subgraph AuditSinks [Audit Sinks]
-            GwLog[(gateway.log\nstderr via nohup)]
-            NetEvents[(security_audit.db\nnetwork_events table)]
-            McpEvents[(security_audit.db\nmcp_events table)]
+            GwLog[(gateway.log)]
+            NetEvents[(security_audit.db\nnetwork_events)]
+            McpEvents[(security_audit.db\nmcp_events)]
         end
     end
 
-    subgraph Orchestration [Orchestration Runtime]
+    subgraph Orchestration [Orchestration]
         Nemo[NemoClaw Onboarder]
         OShell[OpenShell Control Plane]
     end
@@ -91,7 +90,9 @@ flowchart TD
     %% Control plane configures data plane
     GuardCLI --> AdminAPI
     AdminAPI --> GwCfg
+    GuardCLI --> BridgeState
     GwCfg -.read on start / reload.-> DataPlane
+    BridgeState -.read on bridge ops.-> Bridge
 
     %% Orchestration provisions workload
     Nemo -->|Registers Provider| OShell
@@ -105,364 +106,42 @@ flowchart TD
 
     %% Data plane -> upstream
     Inference -->|httpx, pattern filter| External[LLM Providers]
-    Bridge -->|httpx| MCPUpstream[MCP Upstream\nGitHub, context7, ...]
+    Bridge -->|httpx| MCPUpstream[MCP Upstreams\nGitHub, context7, earnings, ...]
 
-    %% Audit writes (asymmetric - see table below diagram)
-    Inference -->|ALLOWED/BLOCKED + httpx log| GwLog
-    Inference -->|host/port/method/path/bytes/latency| NetEvents
-    Bridge -->|httpx log + uvicorn access only\nno business-level line| GwLog
-    Bridge -->|server_name/action/decision/latency\nno bytes/path| McpEvents
+    %% Audit writes (asymmetric - see §2.3)
+    Inference --> GwLog
+    Inference --> NetEvents
+    Bridge --> GwLog
+    Bridge --> McpEvents
 ```
 
-**Audit coverage note** — the two data-plane routes do NOT write the same shape of audit. See table below for the current asymmetry:
+The control plane is a **side channel** — the workload talks directly to the data plane on port 8090; the control plane only mutates configuration files and in-memory caches (via the Admin API).
+
+### 2.2 Why three route groups share one port
+
+Historical decision, not a design claim. The gateway grew inference → MCP proxy → admin API incrementally. Current consequences:
+
+1. **Single bind `0.0.0.0:8090`** — the sandbox can reach all three namespaces. Admin API is gated by `GUARD_ADMIN_TOKEN` but the check has a fail-open branch when the token is unset (deployment footgun).
+2. **URL namespace adjacency** — `/v1/mcp/{name}/` (bridge) and `/v1/mcp/servers` (admin) share a prefix; disambiguation is by exact string match on `servers`/`policy`/`events`, so no MCP server can be named any of those.
+3. **Shared rate/audit pipeline** — but audit shapes differ (see §2.3).
+
+A separate architecture review plan (`velvet-sleeping-trinket.md`) proposes tightening this: fail-closed admin token, `/admin/*` rename, optional loopback-only admin listener. That work is tracked, not yet scheduled.
+
+### 2.3 Audit coverage asymmetry
+
+Each signal is written at a different layer. Coverage is **not uniform** between the inference path and the bridge path.
 
 | Signal | Inference (`/v1/chat/completions`) | Bridge (`/mcp/{name}`) |
 |---|---|---|
-| `gateway.log` business line (`ALLOWED`/`BLOCKED`) | ✅ | ❌ (block case leaves no log line) |
-| `gateway.log` httpx outbound line | ✅ | ✅ |
-| `gateway.log` uvicorn inbound access | ✅ | ✅ |
-| `network_events` (host/port/method/path/bytes/latency) | ✅ | ❌ |
-| `mcp_events` (server_name/action/decision/actor) | ❌ | ✅ |
-
-### Key Breakthroughs (v5-v8)
-1. **Validation Loop Resolution**: Mapping `host.openshell.internal` to `127.0.0.1` on the host side lets `nemoclaw onboard` validate the custom security gateway during installation.
-2. **Permanent Guard Bridge Rule**: The base sandbox policy should permanently allow the chosen Guard bridge endpoint during installation. `host.openshell.internal:8090` can remain as a compatibility entry, but remote validation showed that it may resolve to `172.17.0.1` without providing a reachable host HTTP bridge, so product defaults should move toward an explicit external bridge host/domain.
-2. **Mock Success Logic**: `gateway.py` detects NemoClaw onboarding probes and returns mock success, enabling non-interactive installation without real upstream LLM calls.
-3. **Persistent Source Pattern**: Scripts bypass the official `nemoclaw.sh` bootstrap temp-dir bug by downloading the NemoClaw source tarball to `~/.nemoclaw/source/`, then running `scripts/install.sh` directly.
-4. **Immediate Docker Access**: `sudo chmod 666 /var/run/docker.sock` avoids the common EC2 session restart lag for Docker access.
-5. **Environment Persistence**: Installers update `~/.bashrc` with required `PATH` and `nvm` exports for permanent command availability.
-6. **Blueprint Pre-merge**: Custom blueprint content is synced into the NemoClaw source tree before `install.sh` runs, so the first onboard uses Guard's config directly.
-7. **Gateway Systemd Service**: `guard-gateway.service` provides auto-start on EC2 reboot and crash recovery.
-8. **OpenClaw 2026.4.2 Baseline**: The project now stays on OpenClaw `2026.4.2`, which already provides the native MCP capability required for the current design.
-9. **Provider Auto-selection Guardrail**: The installer temporarily masks direct provider keys during onboarding so NemoClaw does not auto-select NVIDIA/OpenAI/etc. instead of the intended custom endpoint flow.
-10. **Stale Source Cache Guardrail**: `~/.nemoclaw/source` is refreshed automatically when its cached OpenClaw baseline does not match the requested `OPENCLAW_VERSION`.
-11. **MCP Architecture Reset**: EC2 validation showed that treating mapped `openclaw.json` as the stable MCP runtime source is unreliable on the normal NemoClaw path, so the project moved MCP toward a Guard-governed host-to-sandbox bridge model, with the minimal HTTP executor now implemented on top of the existing gateway reverse proxy.
----
-
-## 4b. Model Setup Wizard (`guard/wizard.py`)
-
-The setup wizard bridges the gap between `.env` key configuration and the runtime model selection that was previously hardcoded.
-
-### Problem
-Previously, `NEMOCLAW_MODEL` was hardcoded to `nvidia/nemotron-3-super-120b-a12b:free` in install scripts. Users who configured `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` still got the OpenRouter free model by default, with no way to choose during installation.
-
-### Solution Architecture
-```
-.env (API keys) -> wizard.py -> Tests connectivity per provider
-                              |
-                              +-> Presents numbered model menu
-                              |   (only reachable providers shown)
-                              |
-                              +-> Writes MODEL_ID to .env
-                              +-> Patches blueprint.yaml
-                                 (inference.profiles.default.model)
-```
-
-### Execution Flow in `install_blueprint_ec2.sh` (legacy)
-
-> **Note**: For MCP-enabled deployments, use `ec2_ubuntu_start.sh` instead (see Section 9.2).
-
-```
-Step 0:  System dependencies (apt-get)
-Step 1:  Python venv + pip install
-Step 1b: wizard.py (reads .env, tests APIs, user picks model; TTY auto-detect)
-Step 2:  Start gateway.py (with MODEL_ID from wizard.py)
-Step 3:  Download NemoClaw source tarball (persistent ~/.nemoclaw/source/)
-Step 3b: Pre-merge Guard Blueprint into source tree (all policies/*, not just presets)
-Step 3c: (Optional) If OPENCLAW_VERSION set: build Dockerfile.base locally
-Step 3d: Run official scripts/install.sh (NEMOCLAW_REPO_ROOT -> Path A from source)
-Step 4a: Persist PATH to ~/.bashrc
-Step 4b: Configure systemd guard-gateway.service (auto-start on reboot)
-```
-
-### Key Design Decisions
-- **Runs before gateway**: `wizard.py` tests upstream providers directly (not via the local gateway) so it works on a fresh install.
-- **Writes both `.env` and `blueprint.yaml`**: `.env` is consumed by `gateway.py` and start scripts; `blueprint.yaml` is consumed by NemoClaw onboard.
-- **TTY auto-detect**: `sys.stdin.isatty()` auto-switches to non-interactive when no terminal is attached (CI/SSH without `-t`). Override with `--interactive` or `--non-interactive` flags.
-- **No new dependencies**: Uses `httpx` and `pyyaml` already in project dependencies.
-
----
-
-## 5. Blueprint Loading Mechanism: The "Global Sync" Strategy
-
-To ensure NemoClaw consumes the project-specific blueprint without requiring complex CLI path injections, the system employs a **Global Source Synchronization** mechanism.
-
-### The Mechanism
-NemoClaw's onboarding engine uses a prioritized search path for blueprints. The primary authoritative location is the user's global configuration directory: `~/.nemoclaw/source/nemoclaw-blueprint/`.
-
-### Implementation Steps (v2: Pre-merge)
-1.  **Source Download**: The installer downloads the NemoClaw source tarball to `~/.nemoclaw/source/` (bypassing the official `nemoclaw.sh` bootstrap which has a temp-dir cleanup bug).
-2.  **Pre-merge**: Before running `install.sh`, the installer copies official policy presets into our project directory, then uses `rsync -a --delete` to overwrite the source tree's `nemoclaw-blueprint/` with our custom version.
-3.  **Single Onboard**: `install.sh` runs its built-in onboard step, which automatically uses the pre-merged blueprint. No second onboard is needed.
-4.  **Cross-Layer Binding**: The blueprint defines relative mappings (e.g., `sandbox_workspace/openclaw`), and NemoClaw binds host-side configuration (Layer 2) to the sandbox runtime (Layer 3).
-
-This strategy guarantees that the **Source of Truth** always resides within the version-controlled repository while remaining perfectly compatible with NemoClaw's standardized deployment lifecycle.
-
----
-
-## 5b. OpenClaw Version Override Strategy
-
-### Problem
-The GHCR base image (`ghcr.io/nvidia/nemoclaw/sandbox-base:latest`) pins a specific OpenClaw version (e.g., `2026.3.11`). Users may need a newer or different version without waiting for the GHCR image to be updated.
-
-### Failed Approaches
-1. **`sed` on `Dockerfile.base` only**: The sandbox `Dockerfile` uses `FROM ghcr.io/...sandbox-base:latest` - it pulls the pre-built GHCR image, ignoring local `Dockerfile.base` modifications.
-2. **Inject `RUN npm install -g openclaw@X` into sandbox `Dockerfile`**: Creates a new Docker layer with the second copy of openclaw. Due to Docker's overlay filesystem, the old version in the base layer cannot be removed, resulting in **+1.7GB image bloat** (4.1GB vs 2.4GB). The OpenShell gateway's image upload times out on constrained instances.
-3. **Merge `npm install` into existing `RUN` layer**: Same 4.1GB result - npm downloads to cache + installs new openclaw, while old version persists in base layer below.
-
-### Working Solution: Local Base Image Build
-```
-.env (OPENCLAW_VERSION=2026.4.2)
-    |
-    v
-sed on Dockerfile.base: openclaw@2026.3.11 -> openclaw@2026.4.2
-    |
-    v
-docker build -f Dockerfile.base -t ghcr.io/nvidia/nemoclaw/sandbox-base:latest .
-    |
-    v
-nemoclaw onboard -> sandbox Dockerfile FROM ${BASE_IMAGE} -> uses local image
-    |
-    v
-Sandbox has openclaw@2026.4.2 (image size: ~2.2GB, same as default)
-```
-
-The local build tags the image with the same name as the GHCR image, so Docker's `FROM` directive uses the local version instead of pulling from GHCR. The resulting image is actually slightly smaller (~2.2GB vs ~2.4GB) because it only contains one version of openclaw.
-
----
-
-## 5c. Gateway Persistence (systemd)
-
-### Problem
-The gateway was started via `nohup`, which doesn't survive EC2 reboots. Manual intervention was required after every reboot.
-
-### Solution
-The installer creates a systemd service `guard-gateway.service`:
-- **Auto-start on boot** (`WantedBy=multi-user.target`)
-- **Crash recovery** (`Restart=always`, `RestartSec=3`)
-- **Environment from `.env`** (`EnvironmentFile=$PROJECT_DIR/.env`)
-- **Replaces nohup**: The installer kills the `nohup` gateway before enabling systemd
-
-The `nohup` launch in Step 2 is still needed for the installation process itself (NemoClaw onboard requires a running gateway), but systemd takes over in Step 4b.
-
----
-
-## 6. Operational Workflow
-
-### Installation (Zero-to-Hero)
-
-**AWS EC2 (recommended for full inference deployment and MCP governance work):**
-```bash
-bash ec2_ubuntu_start.sh    # normal NemoClaw install + Guard-managed inference path
-```
-
-**Separate MCP rollout after base install:**
-```bash
-export GUARD_BRIDGE_HOST=bridge.example.com
-export GUARD_BRIDGE_PORT=8090
-bash install_mcp_bridge.sh --all
-```
-
-**Legacy / WSL installers (without MCP onboard flow):**
-```bash
-./install_blueprint_wsl.sh  # For Windows WSL
-./install_blueprint_ec2.sh  # For AWS EC2 (legacy, no MCP registration)
-```
-
-### Runtime Path: Inference
-1.  **Request**: OpenClaw in sandbox sends model requests to `https://inference.local/v1`.
-2.  **Interception**: OpenShell egress policy redirects this to `http://host.openshell.internal:8090/v1`.
-3.  **Audit**: `gateway.py` on the host intercepts the request, checks for dangerous commands (like `rm -rf /`), and logs the audit.
-4.  **Forward**: If safe, the gateway forwards the request to the real provider (OpenRouter/OpenAI/Anthropic) using API keys from the host's `.env`.
-
-### Runtime Path: MCP (implemented minimal execution plane)
-1.  **Register**: Guard writes approved MCP server metadata to `gateway.yaml` through the admin API.
-    Public custom MCP servers can now use the product-facing path `guard mcp install <name> <url> ...` without `--credential-env`; credential injection remains optional and only applies when the upstream actually needs a bearer token.
-2.  **Plan**: `guard bridge add <name> --sandbox <sandbox>` records the intended host-to-sandbox bridge in `.guard/mcp-bridges.json`.
-3.  **Activate**: `guard bridge activate <name> --sandbox <sandbox>` marks the bridge active and binds it to the Guard gateway runtime on port `8090` by default.
-4.  **Execute**: `guard.gateway` serves `/mcp/{server}` and `/v1/mcp/{server}` as the minimal host-side HTTP bridge executor for approved HTTP MCP upstreams.
-5.  **Primary consumer: native OpenClaw bundle MCP**: Guard can now render or stage the OpenClaw `4.2` bundle plugin files required for native MCP tool injection. The bundle `.mcp.json` must use `url` and optional `transport`, not `baseUrl`.
-6.  **Optional debug consumer: mcporter**: The sandbox can still register the rendered bridge URL through `mcporter config add ... --transport <mcporter-transport> --scope home` for inspection/debugging. Guard's `streamable_http` bridge mode maps to `mcporter`'s `http` transport.
-7.  **Host alias selection**: For host-routed bridge URLs, the product should prefer an explicit external bridge host/domain first, then a validated host private IP if needed. `host.openshell.internal` remains a compatibility fallback only. In the validated EC2 runtime, direct `172.17.0.1:8090` access returned `ECONNREFUSED`, while proxied requests to `http://host.openshell.internal:8090/...` succeeded through the default sandbox proxy path.
-8.  **SSRF override for private bridge hosts**: when the chosen bridge host resolves to private RFC1918 space, Guard onboarding must render matching `allowed_ips` for the `guard_bridge_host` endpoint. `GUARD_BRIDGE_ALLOWED_IPS` is now the install-time escape hatch for compatibility aliases such as `host.openshell.internal`, and `ec2_ubuntu_start.sh` auto-detects the local Docker bridge IP before generating the final policy.
-9.  **Current limitation**: automatic in-sandbox placement of the native bundle plugin is now scriptable on the host side, but the overall MCP rollout still needs tighter productization. Non-HTTP/stdin MCP execution is still future work.
-
-Validation note: direct sandbox `POST initialize` requests against the Guard bridge URL are the right protocol-level check, but April 15, 2026 remote EC2 validation also showed an important topology constraint: `host.openshell.internal` can be approved in policy yet still resolve to `172.17.0.1` with `ECONNREFUSED`, and direct host private/public IP access to `:8090` can also fail from the sandbox. In other words, bridge approval and bridge reachability are separate concerns. `inference.local` also failed as a generic MCP bridge path with policy restrictions, so it should remain inference-only rather than a sandbox MCP bridge URL.
-
-Additional validation note: when the Guard bridge was exposed through a bundle plugin under `/sandbox/.openclaw/extensions/<plugin-id>/` and the bundle `.mcp.json` used:
-
-```json
-{
-  "mcpServers": {
-    "github": {
-      "url": "http://host.openshell.internal:8090/mcp/github/",
-      "transport": "streamable-http"
-    }
-  }
-}
-```
-
-OpenClaw `2026.4.2` surfaced native GitHub MCP tools inside `openclaw agent --json` `systemPromptReport.tools.entries`, including `github__get_me`. This confirms that OpenClaw `4.2` already has the required native runtime support; no `4.10` upgrade is required just for HTTP MCP tool injection.
-
-Latest EC2 validation also confirmed that `openclaw tui` could successfully call GitHub MCP and return live repository results from inside the sandbox, so the path is now validated at the interactive user level, not just at the schema/tool-discovery layer.
-
-Most recent EC2 validation tightened that conclusion further:
-
-- Staging the bundle directly into the host-mapped extension root `sandbox_workspace/openclaw-data/extensions/guard-mcp-bundle/` was enough for the running sandbox to discover it through `/sandbox/.openclaw/extensions/guard-mcp-bundle/`.
-- A native agent call asking GitHub MCP for the current login returned `bforecast`, proving live tool execution rather than only tool discovery.
-- The previously discussed `openclaw.json` plugin-enable mutation is therefore no longer treated as a required production step for the validated 2026.4.2 path.
-
-Additional April 15, 2026 product-path validation:
-
-- Guard CLI was updated so public custom MCP servers no longer require `--credential-env` during `guard mcp install`.
-- Re-testing with
-  `guard mcp install earnings https://earnings-mcp-server.brilliantforecast.workers.dev/mcp --transport streamable_http --by admin`
-  succeeded on EC2 and produced:
-  - approved MCP registry entry
-  - runtime allowlist entry for `earnings-mcp-server.brilliantforecast.workers.dev:443`
-  - `Credential env: -`
-- Remaining failure for that specific `earnings` server is now isolated to the upstream MCP endpoint returning `HTTP 403` on initialize, not to Guard registration / approval / bridge activation.
-
-### Maintenance
-*   **Security Rules**: Modify `guard/gateway.py` to add new blocking patterns.
-*   **Network Policies**: Update `gateway.yaml` `network.{install,runtime}` sections, then `POST /v1/network/policy/reload` to hot-reload without restart.
-*   **MCP Servers**: Use `guard mcp install`, `guard mcp approve`, and `guard bridge add` to manage approved MCP definitions and planned bridge attachments.
-*   **Artifact Sync**: Re-run `guard onboard` when blueprint structure or inference artifacts change. MCP bridge runtime materialization is separate follow-up work.
----
-
-## 7. Network Authorization & Real-time Detection (V6)
-
-Adds an explicit network layer that complements the existing pattern matching, plugging two long-standing gaps:
-
-1.  **Install-time blind spot** - `install_blueprint_*.sh` previously trusted any host that `curl`/`pip`/`npm` reached during Step 3.
-2.  **Runtime invisibility** - `gateway.py` only audited *which provider/model* a request hit, never *which TCP endpoint* the host actually connected to, nor whether sandbox processes were performing out-of-band egress.
-
-### 7.1 Architecture
-
-```mermaid
-flowchart LR
-    subgraph Install [Install Phase]
-        Script[install_blueprint_ec2.sh] -->|http_proxy=:8091| Proxy[install_proxy.py]
-        Proxy -->|allow-listed CONNECT| Internet1[github.com / npm / pypi / ghcr]
-        Proxy -.->|denied| Audit[(security_audit.db<br/>network_events)]
-    end
-    subgraph Runtime [Runtime Phase]
-        GW[gateway.py] -->|authorize+record| Monitor[NetworkMonitor]
-        GW --> Upstream[api.openai.com / openrouter.ai / ...]
-        Monitor --> Audit
-        Capture[network_capture.py<br/>eBPF / ss fallback] -->|tcp_v4_connect| Audit
-        Capture -.watches PIDs.-> GW
-        Capture -.watches PIDs.-> Sandbox[OpenClaw sandbox container]
-    end
-```
-
-### 7.2 Components
-
-| Component | Layer | Backend | Default |
-|---|---|---|---|
-| `network_monitor.py` | Library | sqlite3 | n/a |
-| `install_proxy.py` | Install proxy on `127.0.0.1:8091` | stdlib socket + select | `default: deny` |
-| `gateway.py` upstream hooks | Application | httpx interception | `default: warn` |
-| `network_capture.py` | Kernel daemon | bcc eBPF, ss fallback | `default: warn` |
-
-### 7.3 Decision Model
-
-`NetworkMonitor.authorize(host, port, scope)` returns one of:
-- `allow` - entry matched, `enforcement=enforce`
-- `warn` - recorded with non-fatal reason
-- `monitor` - recorded silently
-- `block` - `default=deny` + no entry, or rate limit exceeded
-
-Per-entry `rate_limit: { rpm: N }` uses a 60-second sliding window keyed on `host`. Hot-reload via `POST /v1/network/policy/reload` clears the rate buckets.
-
-### 7.4 systemd
-
-Two units, `EnvironmentFile` of `.env`:
-- `guard-gateway.service` - runs as the install user, app-layer monitor + LLM router
-- `guard-network-capture.service` - runs as `root` (eBPF requires `CAP_BPF`/`CAP_SYS_ADMIN`), eBPF or `ss` fallback
-
-### 7.5 Deliberate Non-goals
-
-- TLS termination (no MitM, no CA injection - splice-only)
-- DNS sinkhole (handled separately if needed)
-- Egress quotas / billing
-- Webhook alert delivery (the audit table is the integration point)
-
----
-
-## 8. Guard-owned Config Split + MCP Governance (V7)
-
-This is the current architectural step introduced by the plan in `C:\Users\bfore\.claude\plans\glistening-toasting-gizmo.md` and now implemented in the repository.
-
-### 8.1 Why the refactor was needed
-
-Two layering issues existed in the previous design:
-
-1. `nemoclaw-blueprint/blueprint.yaml` was being used as a dumping ground for Guard-owned `network.*` data that NemoClaw does not consume.
-2. Guard CLI network mutations were directly editing YAML on disk even though the system is increasingly centered around HTTP-administered gateway behavior.
-
-To fix that cleanly, Guard-owned policy moved into a separate config file and MCP governance was built on top of that boundary.
-
-### 8.2 New ownership model
-
-- `nemoclaw-blueprint/blueprint.yaml`
-  - NemoClaw-owned fields only: sandbox, inference profiles, policy, mappings.
-- `gateway.yaml`
-  - Guard-owned fields: `network.install`, `network.runtime`, and `mcp.servers`.
-
-Example shape:
-
-```yaml
-version: 1
-
-network:
-  install:
-    default: deny
-    allow:
-      - host: github.com
-        ports: [443]
-        purpose: NemoClaw source tarball
-  runtime:
-    default: warn
-    allow:
-      - host: openrouter.ai
-        ports: [443]
-        purpose: OpenRouter upstream
-
-mcp:
-  servers:
-    - name: github
-      url: https://api.githubcopilot.com/mcp/
-      transport: streamable_http
-      credential_env: GITHUB_MCP_TOKEN
-      status: approved
-      registered_at: 2026-04-13T22:04:06Z
-      approved_at: 2026-04-13T22:04:06Z
-      approved_by: admin
-      purpose: GitHub MCP (repos, issues, PRs, code search)
-```
-
-### 8.3 Code changes delivered
-
-- New file `gateway.yaml` at the project root.
-- New module `guard/gateway_config.py` for Guard-owned YAML I/O and MCP server operations.
-- `guard/blueprint_io.py` reduced to NemoClaw-relevant helpers such as `set_default_model`.
-- `guard/network_monitor.py`, `guard/network_capture.py`, `guard/onboard.py`, and `guard/wizard.py` now read/write Guard policy from `gateway.yaml`.
-- New migration script `tools/migrate_blueprint_to_gateway.py` to move `network:` out of `nemoclaw-blueprint/blueprint.yaml`.
-
-### 8.4 MCP Architecture
-
-The current implemented MCP architecture is now split into:
-
-- **Control plane implemented**:
-  - Guard governs MCP registration, approval, audit, and allowlists in `gateway.yaml`.
-  - Guard records planned bridge attachments in `.guard/mcp-bridges.json`.
-- **Execution plane minimally implemented**:
-  - Guard does **not** currently claim that mapped sandbox `openclaw.json` is a stable production path for MCP delivery.
-  - Approved HTTP MCP upstreams can now be bridged through the existing gateway `/mcp/{server}` reverse proxy.
-  - Future expansion can still follow the broader compatibility direction illustrated by NemoClaw PR #565.
-
-#### 8.4.1 Current MCP architecture (implemented control plane + minimal runtime)
+| `gateway.log` — business line (`ALLOWED` / `BLOCKED` / `BRIDGE-ALLOWED` / `BRIDGE-BLOCKED`) | `ALLOWED` / `BLOCKED` on every request | `BRIDGE-ALLOWED` on success, `BRIDGE-BLOCKED [...] <category>` on block (categories: `not-found`, `not-approved`, `net-policy`, `upstream-error`) |
+| `gateway.log` — httpx outbound line | yes | yes |
+| `gateway.log` — uvicorn inbound access | yes | yes |
+| `network_events` table (host/port/method/path/bytes/latency) | yes | **no** (gap) |
+| `mcp_events` table (server_name/action/decision/actor) | no | yes (for `call` rows and governance actions) |
+
+The `network_events` gap for bridge traffic is a known P2 item — see §6.
+
+### 2.4 MCP sub-architecture
 
 ```mermaid
 flowchart TB
@@ -495,248 +174,239 @@ flowchart TB
     Bridge -.-> Other
 ```
 
-#### 8.4.2 Operational sequence
-
-1. Operator runs `guard mcp install <name> --by <actor>`.
-2. Guard writes the MCP definition to `gateway.yaml` and marks it approved.
-3. Operator runs `guard bridge add <name> --sandbox my-assistant --workspace .`.
-4. Operator runs `guard bridge activate <name> --sandbox my-assistant --workspace .`.
-5. Guard records the bridge attachment in `.guard/mcp-bridges.json` and marks it active on the gateway-backed runtime.
-6. Operator renders the bridge URL and registers it with the sandbox-side HTTP MCP client.
-
-## 9. EC2 End-to-End Deployment & MCP Architecture Findings (V8)
-
-This section documents the findings from full-stack EC2 deployment testing on April 12-13, 2026 and the resulting architectural corrections.
-
-### 9.1 Deployment script: `ec2_ubuntu_start.sh`
-
-The EC2 installer now stays on the normal NemoClaw path while preserving Guard-managed inference routing. MCP runtime delivery is no longer framed as a completed host-staged config injection solution.
-
-Key differences from the earlier Guard-heavy flow:
-
-| Aspect | Earlier EC2 flow | Current direction |
-|--------|------------------|-------------------|
-| `openclaw.json` ownership | Guard-generated, then uploaded/replaced post-install | NemoClaw-generated at image build time |
-| Sandbox config mutation | Post-build injection and restart attempts | Avoided |
-| Onboard count | `install.sh` plus an extra `nemoclaw onboard` | Single normal install path |
-| MCP in installer | Pre-registered and injected into sandbox config | Governance only during install; runtime bridge remains follow-up work |
-| Inference routing | Guard plus repeated correction steps | Guard endpoint supplied during install, then final `openshell inference set` |
-
-### 9.2 Execution flow
-
-```
-Step 0:  System pre-checks (disk, memory)
-Step 1:  Base dependencies (apt-get + expect)
-Step 2:  Docker
-Step 3:  Python venv + pip install -e .
-Step 4:  Load .env keys + generate GUARD_ADMIN_TOKEN
-Step 5:  Start Guard Gateway (:8090)
-Step 6:  NemoClaw installation (source tarball + blueprint pre-merge + official install.sh)
-         with direct provider keys temporarily masked to preserve custom-endpoint onboarding
-         then set the final OpenShell inference route to Guard
-```
-
-This keeps the deployment aligned with how NemoClaw normally builds and locks sandbox config, which is exactly why the project stopped treating runtime `openclaw.json` mutation as the long-term MCP answer.
-
-In practice, this also means the installer must control which credentials are visible to `install.sh`. If host-side provider keys such as `NVIDIA_API_KEY` are left in the environment, NemoClaw can prefer a direct NVIDIA/OpenAI/Anthropic route during onboarding. The current EC2 script avoids that by masking direct provider keys for the install step and restoring them immediately afterwards.
-
-The installer must also control source freshness. If `~/.nemoclaw/source` is reused from an older experiment, the source-install path can silently inherit an older OpenClaw pin even when the project blueprint has moved on. The current EC2 script checks the cached `Dockerfile.base` version and refreshes the source tree automatically when it does not match the target baseline.
-
-### 9.3 Key technical discoveries
-
-#### 9.3.1 OpenClaw API key mechanism
-
-OpenClaw 2026.4.2 reads API keys from `models.providers.{name}.apiKey` in `openclaw.json`, not from `auth-profiles.json` (which is for OAuth only). The value `"guard-managed"` is a placeholder 閳?real authentication is handled by the `inference.local` proxy via OpenShell. This version is now the pinned project baseline because its native MCP support is sufficient for the direct-MCP design, so the extra 2026.4.10 upgrade path is no longer needed.
-
-```json
-{
-  "models": {
-    "providers": {
-      "openrouter": {
-        "baseUrl": "https://inference.local/v1",
-        "apiKey": "guard-managed",
-        "request": { "allowPrivateNetwork": true },
-        "models": [...]
-      }
-    }
-  }
-}
-```
-
-#### 9.3.2 `allowPrivateNetwork` flag
-
-OpenClaw 2026.4+ blocks `inference.local` by default (SSRF guard). Each provider entry in `openclaw.json` requires `"request": {"allowPrivateNetwork": true}` to bypass this for the sandbox proxy hop.
-
-#### 9.3.3 Sandbox binary paths
-
-Binaries inside the sandbox are at `/usr/local/bin/`, not `/usr/bin/`. Network policy `binaries` entries must match exactly, or the OpenShell egress proxy rejects requests from those processes.
-
-```yaml
-binaries:
-  - path: /usr/local/bin/openclaw
-  - path: /usr/local/bin/node
-```
-
-#### 9.3.4 Sandbox config ownership
-
-```
-/sandbox/.openclaw/           (ro mount from sandbox_workspace/openclaw/)
-  閳规壕鏀㈤埞鈧?openclaw.json           (immutable config: apiKey, models, MCP)
-  閳规柡鏀㈤埞鈧?agents/ -> /sandbox/.openclaw-data/agents  (symlink)
-
-/sandbox/.openclaw-data/      (rw mount from sandbox_workspace/openclaw-data/)
-  閳规柡鏀㈤埞鈧?agents/main/agent/
-        閳规柡鏀㈤埞鈧?auth-profiles.json
-```
-
-The important boundary is that `/sandbox/.openclaw/openclaw.json` is baked and hash-protected. Uploading rw auth artifacts is still valid for data dirs under `.openclaw-data`, but replacing `openclaw.json` itself is not a stable installer strategy.
-
-#### 9.3.5 `openshell policy set` limitations
-
-`openshell policy set` silently drops network policy entries that use `access: full`. Only entries with `protocol: rest` + `rules` format are applied. However, even correctly formatted entries beyond the base 3 (inference_local, openclaw_api, openclaw_docs) may not take effect.
-
-For MCP host allowlisting, the supported mechanism remains NemoClaw policy presets plus the Guard-managed runtime allowlist in `gateway.yaml`. The current implementation keeps preset generation in Guard (`sandbox_policy.py`) and stages the mapped OpenClaw config separately through `guard mcp sync` or `guard onboard`.
-
-Separately, the Guard bridge itself is now treated as install-time base infrastructure. The base sandbox policy still carries a compatibility rule for `host.openshell.internal:8090` for `openclaw`, `node`, `python3`, and `curl`, but runtime testing showed that this alias alone does not guarantee a reachable host-side HTTP bridge in remote deployments. The product direction therefore shifts toward an explicit external bridge host/domain first, with the compatibility alias retained only as a fallback.
-
-#### 9.3.6 Model routing: `nvidia/` prefix
-
-Models with `nvidia/` prefix (e.g., `nvidia/nemotron-3-super-120b-a12b:free`) are free-tier on OpenRouter, not NVIDIA direct API. Routing to `integrate.api.nvidia.com` returns 404. All `org/model` patterns now route to the `openrouter` provider:
-
-```python
-MODEL_ROUTES = [
-    (r"^(gpt-|o1-|o3-|o4-|dall-e|tts-|whisper)", "openai"),
-    (r"^claude-", "anthropic"),
-    (r"^(openrouter/|nvidia/|meta/|mistralai/|google/|microsoft/|deepseek/|anthropic/|openai/)", "openrouter"),
-]
-```
-
-### 9.4 MCP architecture status
-
-Earlier EC2 experiments attempted to make MCP part of the installer by generating or replacing sandbox `openclaw.json` after installation. That approach is now considered structurally unsound because it conflicts with NemoClaw''s normal config lifecycle:
-
-1. `openclaw.json` is written in the sandbox image build.
-2. Its hash is pinned at build time.
-3. The entrypoint verifies integrity at startup.
-
-As a result, the project no longer treats 鈥渋nstaller-time MCP injection鈥?as the primary path. The current status is:
-
-- inference routing through Guard is part of the supported EC2 installer
-- MCP control-plane work in Guard remains useful
-- sandbox MCP installation must be redesigned around a supported NemoClaw/OpenClaw flow
-
-Symptoms seen in EC2 testing that motivated this change:
-
-- `openclaw mcp list` was empty even after Guard-side MCP registration
-- the running sandbox model could fall back to NemoClaw''s own defaults when multiple onboarding/config-mutation steps overlapped
-- repeated OpenShell `pending` entries for `host.openshell.internal:<port>` even after approval, because the runtime kept resolving that alias to `172.17.0.1`
-- `curl` and Node probes showed the same final failure mode: bridge access to `host.openshell.internal`, host private IP, and host public DNS name could still end in `ECONNREFUSED` from inside the sandbox
-
-### 9.4.1 Additional April 15, 2026 bridge reachability finding
-
-Remote EC2 validation refined the MCP bridge picture further:
-
-- OpenShell may show network rules such as `host.openshell.internal:8090` with `allowed ips: 172.17.0.1`.
-- This does **not** mean the Guard bridge is actually reachable.
-- In the tested runtime, `host.openshell.internal` consistently resolved to `172.17.0.1`, but direct sandbox requests to that address returned `ECONNREFUSED`.
-- Keeping the default sandbox proxy enabled changed the symptom from `ECONNREFUSED` to `403 Forbidden`, which indicates proxy-policy rejection rather than successful host-bridge routing.
-
-Implementation implication:
-
-- Guard should stop treating `host.openshell.internal` as the default bridge destination.
-- `guard bridge detect-host-alias` should prefer an explicit external bridge host/domain or a validated host IP first.
-- Documentation should explain that repeated `pending` entries can occur per binary/path even when a hostname-level rule appears to exist.
-
-### 9.5 Verified end-to-end test results (EC2, 2026-04-13)
-
-| Test | Result | Detail |
-|------|--------|--------|
-| Unit tests | 76/76 passed | Both local (Windows) and EC2 (Linux) |
-| Inference chain | OK | Sandbox 閳?inference.local 閳?Guard Gateway 閳?OpenRouter 閳?"Hello!" |
-| Dangerous prompt blocking | OK | `rm -rf` 閳?HTTP 403 Forbidden |
-| GitHub MCP `get_repository` | OK | `torvalds/linux` 閳?"Linux kernel source tree, 228,472 stars" |
-| GitHub MCP `search_repositories` | OK | Returned real search results |
-| Gateway health | OK | `/health` returns providers + network_monitor status |
-| Sandbox status | OK | `my-assistant` phase: Ready |
-
-### 9.6 Code changes in this iteration
-
-| File | Change |
-|------|--------|
-| `guard/gateway.py` | MODEL_ROUTES: `nvidia/` prefix routes to openrouter, not nvidia API |
-| `guard/onboard.py` | Added `apiKey` + `allowPrivateNetwork` to all providers in `_write_openclaw_config()` |
-| `guard/onboard.py` | Fixed binary paths from `/usr/bin/` to `/usr/local/bin/` in all policy entries |
-| `guard/onboard.py` | Added rw data dir creation + mirrored auth writes for sandbox symlink target |
-| `guard/onboard.py` | Changed `_project_network_policies` from `access: full` to `protocol: rest` + `rules` |
-| `guard/onboard.py` | `_build_mcp_servers_config()` reads approved servers and resolves tokens from env |
-| `guard/sandbox_policy.py` | New module: preset generation, file I/O, policy merge, sandbox apply |
-| `ec2_ubuntu_start.sh` | Complete rewrite: 9-step flow, no docker ops, expect automation, correct ordering |
-| `gateway.yaml` | Added `api.githubcopilot.com` to runtime allowlist |
-| `tests/test_gateway.py` | Added nvidia/ routing + org-prefix routing tests |
-| `tests/test_sandbox_policy.py` | New: preset structure, openclaw.json MCP + apiKey assertions |
-
-### 9.7 Known limitations
-
-1. **`openshell policy set` ceiling**: Only 3 base network policies are enforced by OpenShell regardless of how many are in the YAML. MCP hosts require NemoClaw presets.
-2. **`nemoclaw policy-add` is interactive**: Automated via `expect`, but fragile if the TUI prompt format changes.
-3. **Tokens in ro mount**: `openclaw.json` contains actual MCP tokens (resolved from env at onboard time). The file is read-only inside the sandbox but not encrypted. Future improvement: use a secret store or short-lived tokens.
-4. **Single sandbox**: `ec2_ubuntu_start.sh` assumes a single sandbox named `my-assistant`. Multi-sandbox support would require parameterization.
+**Ownership boundary**:
+- `gateway.yaml` holds `network.*` + `mcp.servers` — Guard-owned, mutated via the Admin API.
+- `nemoclaw-blueprint/blueprint.yaml` holds only NemoClaw-consumed fields (sandbox, inference profiles, mappings). Guard no longer writes `network:` into the blueprint.
 
 ---
 
-## 10. Current Progress Snapshot (2026-04-17)
+## 3. Install
 
-This section is the single-paragraph status entry for the latest iteration on branch `codex/native-mcp-bridge-path` ("Promote native MCP bridge workflow"). Prior architectural detail remains in sections 1-9; this snapshot only records what moved in the current sprint.
+### 3.1 Recommended paths
 
-### 10.1 Sprint outcome
+| Host | Script | Behavior |
+|---|---|---|
+| WSL (Windows) | `wsl_start.sh` → `install_blueprint_wsl.sh` | Full stack incl. MCP rollout |
+| AWS EC2 Ubuntu | `ec2_ubuntu_start.sh` | Base stack (Guard + NemoClaw). Runs MCP rollout via `install_mcp_bridge.sh` as a second step. |
 
-- OpenClaw `2026.4.2` on the normal NemoClaw install path is now a **validated native MCP runtime**. GitHub MCP was called live from inside the sandbox (`openclaw agent` returned `bforecast`; `openclaw tui` returned real repository data). No `openclaw.json` mutation is required for this path; staging a bundle under `sandbox_workspace/openclaw-data/extensions/guard-mcp-bundle/` is sufficient.
-- Guard's MCP management surface is productized:
-  - `guard mcp install|approve|deny|revoke|status|uninstall|logs` as thin wrappers over the gateway admin API.
-  - `guard bridge add|activate|render|render-openclaw-bundle|stage-openclaw-bundle|verify-runtime|detect-host-alias|print-sandbox-steps` for bridge state and sandbox-side consumption.
-  - `guard mcp install` for public MCP servers no longer requires `--credential-env`; validated against `earnings-mcp-server.brilliantforecast.workers.dev`.
-- `ec2_ubuntu_start.sh` is refocused on the base stack only: system pre-checks, Docker, venv, `.env` + `GUARD_ADMIN_TOKEN`, Guard Gateway, NemoClaw source install, final OpenShell inference route. Sandbox MCP bundle placement, bridge activation, and native rollout are deliberately removed from this script.
-- New `install_mcp_bridge.sh` owns MCP rollout. It activates saved bridge records (`--all` or named), auto-detects a sandbox-reachable host alias, stages the OpenClaw native bundle under the host-mapped extension root, prints sandbox-side next steps, and runs `guard bridge verify-runtime`. It accepts `GUARD_BRIDGE_HOST`/`GUARD_BRIDGE_PORT` env inputs plus per-flag overrides.
-- Bridge host alias policy is explicit: prefer an external bridge host/domain, then a validated private IP, and keep `host.openshell.internal` only as a compatibility fallback. `GUARD_BRIDGE_ALLOWED_IPS` is the install-time escape hatch for the OpenShell SSRF override when the bridge resolves to RFC1918 space; `ec2_ubuntu_start.sh` now auto-detects the local Docker bridge IP.
-- Documentation updated by codex in the same sprint: `implementation_plan.md` (sections 3, 6, 8, 9), `README.md` (architecture + MCP sections, Quick Start split with `install_mcp_bridge.sh`, OpenClaw 4.2 Native MCP section), `verification_checklist.md` (v8 through 2026-04-16, new Case 3 native bundle flow, PowerShell/EC2 lessons, Final Release Checklist).
+Legacy `install_blueprint_ec2.sh` (pre-MCP-rollout split) is retained for reference but the current EC2 path is `ec2_ubuntu_start.sh` + `install_mcp_bridge.sh`.
 
-### 10.2 Component status
-
-| Area | Status | Notes |
-|------|--------|-------|
-| Guard Gateway (`/health`, `/v1/responses`, `/v1/mcp/*`, `/v1/network/*`) | Stable | systemd-managed; 76/76 unit tests pass |
-| Inference route (sandbox -> inference.local -> Guard -> upstream) | Stable | OpenRouter verified; dangerous prompt returns 403 |
-| MCP control plane (`gateway.yaml` + admin API) | Stable | Registration, approval, revocation, event log |
-| MCP HTTP bridge (`/mcp/{server}`) | Stable (minimal) | Credential injection from host env |
-| OpenClaw 4.2 native bundle consumption | Validated | GitHub MCP `get_me`, `search_repositories`, TUI all OK |
-| `install_mcp_bridge.sh` rollout | Shipped | Replaces MCP steps previously embedded in `ec2_ubuntu_start.sh` |
-| Bridge alias detection | Shipped | `guard bridge detect-host-alias`, `--auto-detect-host-alias` |
-| Non-HTTP / stdio MCP transports | Not supported | Only HTTP/SSE/streamable_http upstreams are bridged today |
-| Sandbox-side bundle auto-enable | Manual | Staging is scripted; enabling inside the sandbox may still need an operator step in non-standard layouts |
-
-### 10.3 Working-tree state (uncommitted on `codex/native-mcp-bridge-path`)
-
-The following files have local modifications pending commit as part of this iteration:
+### 3.2 `ec2_ubuntu_start.sh` execution flow
 
 ```
-gateway.yaml
-guard/gateway.py
-guard/sandbox_policy.py
-install_blueprint_ec2.sh
-install_blueprint_wsl.sh
-nemoclaw-blueprint/blueprint.yaml
-tests/test_cli_mcp.py
-tests/test_mcp_proxy.py
-wsl_start.sh
+Step 0  System pre-checks (disk, memory)
+Step 1  Base dependencies (apt-get + expect)
+Step 2  Docker
+Step 3  Python venv + pip install -e .
+Step 4  Load .env keys + generate GUARD_ADMIN_TOKEN
+Step 5  Start Guard Gateway (:8090)
+Step 6  NemoClaw install (source tarball + blueprint pre-merge + official install.sh)
+        - Direct provider keys are temporarily masked during install.sh to
+          prevent NemoClaw from auto-selecting a direct-provider route
+          instead of the Guard-managed `inference.local` path.
+        - Cached `~/.nemoclaw/source/` is auto-refreshed if its
+          Dockerfile.base version does not match the target baseline.
+Step 7  `openshell inference set` to finalize the Guard route
 ```
 
-These changes are consistent with the sprint outcome above (MCP rollout split, native bundle promotion, allowlist adjustments, CLI test coverage).
+MCP rollout is **not** part of this script. After the base install is live, run:
 
-### 10.4 Next up
+```bash
+# Register + approve an MCP server
+python -m guard.cli mcp install <name> <url> --transport streamable_http --by admin
 
-1. Productize in-sandbox native-bundle enable for non-standard extension roots (beyond host-mapped staging).
+# Attach it to a sandbox
+python -m guard.cli bridge add <name> --sandbox <sandbox> --workspace .
+
+# Sync bundle + activate (per sandbox, idempotent)
+GUARD_BRIDGE_HOST=<external-bridge-host> bash install_mcp_bridge.sh <name>     # or --all
+```
+
+`install_mcp_bridge.sh` activates saved bridge records, auto-detects a sandbox-reachable host alias, stages the bundle under `sandbox_workspace/openclaw-data/extensions/guard-mcp-bundle/`, syncs the PVC, restarts the sandbox pod (WSL k3s path) or runs `nemoclaw onboard` as needed, and finally calls `guard bridge verify-runtime`.
+
+Environment inputs:
+
+- `GUARD_BRIDGE_HOST` — external bridge host/domain (preferred).
+- `GUARD_BRIDGE_PORT` — defaults to `8090`.
+- `GUARD_BRIDGE_ALLOWED_IPS` — escape hatch for OpenShell SSRF checks when the bridge resolves to RFC1918 space (`ec2_ubuntu_start.sh` auto-detects the Docker bridge IP).
+
+### 3.3 Blueprint pre-merge mechanism
+
+NemoClaw reads blueprints from `~/.nemoclaw/source/nemoclaw-blueprint/`. The installer uses `rsync -a --delete` to overwrite that tree with the project-local `nemoclaw-blueprint/` before running `install.sh`, so the first (and only) onboard uses Guard's config directly. No second onboard is required.
+
+### 3.4 OpenClaw version override
+
+Setting `OPENCLAW_VERSION=<tag>` in `.env` triggers a `sed` patch on `Dockerfile.base` and a local `docker build` that retags `ghcr.io/nvidia/nemoclaw/sandbox-base:latest` to the local image. NemoClaw's `FROM ${BASE_IMAGE}` then uses the local tag instead of pulling from GHCR. Final image is ~2.2 GB (slightly smaller than GHCR default because only one OpenClaw version is present).
+
+### 3.5 Persistence
+
+`guard-gateway.service` and `guard-network-capture.service` (systemd, `EnvironmentFile=.env`, `Restart=always`) take over after install. The install-time `nohup` gateway is killed before systemd starts.
+
+---
+
+## 4. Runtime
+
+### 4.1 Inference path
+
+1. OpenClaw sends requests to `https://inference.local/v1`.
+2. OpenShell egress policy rewrites this to `http://host.openshell.internal:8090/v1`.
+3. Gateway pattern-matches dangerous commands (`rm -rf /`, etc.) and calls `NetworkMonitor.authorize(upstream_host, 443, "runtime")`.
+4. On allow: `httpx` request to the real provider (OpenRouter / OpenAI / Anthropic / NVIDIA) with host-side API keys.
+5. Writes `network_events` row + `gateway.log` `ALLOWED [provider/model] -> base_url` line.
+
+### 4.2 Bridge (MCP) path
+
+1. OpenClaw — via its bundled `.mcp.json` — sends MCP requests to `http://<bridge-host>:8090/mcp/<name>/`.
+2. Gateway looks up `<name>` in its in-memory `mcp.servers` cache (loaded from `gateway.yaml`).
+3. Validates `status == approved` and calls `NetworkMonitor.authorize(upstream_host, ..., "runtime")`.
+4. On allow: `httpx` request to the upstream MCP server, injecting `Authorization: Bearer ${srv.credential_env}` when configured (resolved from host env at call time).
+5. Writes `mcp_events` row + `gateway.log` `BRIDGE-ALLOWED [name] METHOD url -> status (Nms)` line. Block paths write `BRIDGE-BLOCKED [name] <category> ...`.
+
+### 4.3 Maintenance
+
+| Action | Command |
+|---|---|
+| Add blocking pattern | Edit `guard/gateway.py`, restart service |
+| Hot-reload network policy | `POST /v1/network/policy/reload` (admin token) |
+| Register MCP server | `guard mcp install <name> <url> --transport <t> --by <actor>` |
+| Approve / deny / revoke | `guard mcp approve|deny|revoke <name>` |
+| Attach to sandbox | `guard bridge add <name> --sandbox <s> --workspace <w>` |
+| Sync bundle to sandbox | `bash install_mcp_bridge.sh <name>` (or `--all`) |
+| Re-run blueprint sync | `guard onboard` |
+
+---
+
+## 5. Network Authorization (Layer Detail)
+
+Complements the gateway's request-pattern checks with host/port/bytes-level audit.
+
+### 5.1 Three enforcement points
+
+| Component | Port | Backend | Policy default |
+|---|---|---|---|
+| `install_proxy.py` | `127.0.0.1:8091` | stdlib socket + select, splice-only | `deny` |
+| `gateway.py` upstream hooks | in-process | `httpx` interception | `warn` |
+| `network_capture.py` | kernel | bcc eBPF tracepoint, `ss` fallback on WSL2 | `warn` |
+
+All three write to `security_audit.db`. `install_proxy.py` runs only during Step 3-6 of the installer; it does **not** terminate TLS or inject a CA.
+
+### 5.2 Decision model
+
+`NetworkMonitor.authorize(host, port, scope)` returns `allow` | `warn` | `monitor` | `block`. Per-entry `rate_limit.rpm` uses a 60 s sliding window keyed on host; exceeding it downgrades the verdict to `block`. Policy hot-reload via the admin API clears rate buckets.
+
+### 5.3 Audit schema
+
+Two SQLite tables in `logs/security_audit.db`:
+
+- `network_events` — general traffic (`install_proxy`, `gateway` inference, `ebpf`). Columns: `timestamp, source, scope, pid, host, port, method, path, status, bytes_in, bytes_out, latency_ms, decision, reason`.
+- `mcp_events` — MCP governance + bridge call records. Columns: `timestamp, server_name, action, decision, reason, actor, upstream_host, upstream_status, latency_ms, metadata`.
+
+Read paths: `/v1/network/events?limit=N`, `/v1/mcp/events?limit=N` (both require admin token), or direct SQLite.
+
+### 5.4 Deliberate non-goals
+
+- No TLS termination / MitM. Splice-only; no CA distribution.
+- No DNS sinkhole (use CoreDNS / dnsmasq externally if needed).
+- No egress quota / billing (the audit DB is the integration point).
+- No built-in webhook alerting.
+
+---
+
+## 6. Known Limitations and Backlog
+
+### 6.1 Architecture gaps (tracked)
+
+| Item | Priority | Notes |
+|---|---|---|
+| Admin API `fail-open` when `GUARD_ADMIN_TOKEN` unset | P1 | Plan: `velvet-sleeping-trinket.md` — close to fail-closed + opt-in env + `/admin/*` prefix |
+| Bridge calls missing from `network_events` | P2 | Dual-write bridge traffic to `network_events` alongside `mcp_events` |
+| `openshell policy set` silently drops beyond 3 base entries | Known | MCP host allowlisting relies on NemoClaw presets + Guard runtime allowlist |
+| `nemoclaw policy-add` interactive | Mitigated | Automated via `expect`; fragile to TUI prompt changes |
+| MCP tokens live plaintext in `openclaw.json` (ro mount) | P3 | Future: secret store or short-lived tokens |
+| Single-sandbox assumption in rollout scripts | P3 | `ec2_ubuntu_start.sh` + `install_mcp_bridge.sh` assume `my-assistant` |
+
+### 6.2 Transport coverage
+
+Only HTTP-family MCP upstreams are bridged (`streamable_http`, `sse`, `http`). Stdio-MCP and any non-HTTP transport are not supported today. Tracking NemoClaw PR #565 as a reference for broader compatibility, not as a runtime dependency.
+
+### 6.3 Next up
+
+1. Productize in-sandbox bundle-enable for non-standard extension roots (host-mapped staging is already automated).
 2. Multi-sandbox parameterization for `ec2_ubuntu_start.sh` and `install_mcp_bridge.sh`.
-3. Secret hardening for MCP credentials (short-lived tokens / secret store, avoiding plaintext env reads at proxy time).
-4. Optional `mcporter`-free sandbox schema validation to remove the last debug-only dependency from verification runs.
-5. Consider expanding the bridge executor beyond HTTP-family transports, tracking NemoClaw PR #565 as an architectural reference rather than a runtime dependency.
+3. Secret hardening for MCP credentials.
+4. Execute L1 of the 8090 architecture review (fail-closed admin + `/admin/*` + per-class rate bucket).
+5. Bridge ↔ `network_events` dual-write.
 
+---
+
+## 7. Verification Snapshot
+
+As of 2026-04-19 on `master`. All verifications run against `openclaw 2026.4.2` + OpenShell `0.0.26`.
+
+| Test | Result | Environment |
+|---|---|---|
+| Unit tests | 76/76 pass | Windows + Linux |
+| Inference: sandbox → `inference.local` → Guard → OpenRouter | OK | EC2 (2026-04-13), WSL (2026-04-19) |
+| Dangerous prompt blocking (`rm -rf`) | 403 | EC2 |
+| GitHub MCP `get_me` | Returns `bforecast` | EC2 |
+| GitHub MCP `search_repositories` | Live results | EC2 |
+| context7 MCP install via `guard mcp install` + `install_mcp_bridge.sh` | End-to-end OK | WSL (2026-04-19) |
+| earnings MCP (registration + bridge) | Registration OK; upstream currently returns 403 | EC2 |
+| `openclaw tui` interactive MCP calls | OK | EC2 |
+| Bridge block categories (`not-found` / `not-approved` / `net-policy` / `upstream-error`) | `not-found` validated live; others share the same log.warning path | WSL (2026-04-19) |
+
+---
+
+## Appendix A: Decision Log
+
+Compressed record of superseded approaches. Not required reading for day-to-day operation.
+
+### A.1 MCP delivery: from `openclaw.json` injection to bundle staging
+
+Earlier EC2 experiments generated or overwrote the sandbox's `openclaw.json` after install to register MCP servers. This was structurally unsound:
+
+1. `openclaw.json` is written at image build and hash-pinned.
+2. The sandbox entrypoint verifies integrity at startup; mutations are rejected or silently reverted.
+3. Multiple onboard/mutation steps fought NemoClaw's normal lifecycle, occasionally causing the runtime model to fall back to NemoClaw defaults.
+
+Current path: stage a plugin bundle under `sandbox_workspace/openclaw-data/extensions/guard-mcp-bundle/` (rw mount). OpenClaw 2026.4.2 discovers it via `/sandbox/.openclaw/extensions/guard-mcp-bundle/` and surfaces native tools through `systemPromptReport.tools.entries`. Validated live: `github__get_me` returned `bforecast`.
+
+### A.2 Bridge host alias: `host.openshell.internal` is a fallback only
+
+Remote EC2 validation found that `host.openshell.internal` can pass OpenShell policy approval yet still fail to route to a reachable host HTTP bridge:
+
+- The alias often resolves to `172.17.0.1` (Docker bridge) with `ECONNREFUSED`.
+- Enabling the default sandbox proxy changes the symptom to `403 Forbidden` (proxy-policy reject), not a successful hop.
+- OpenShell may show `pending` entries per binary/path even when a hostname rule exists.
+
+Current product direction: `guard bridge detect-host-alias` prefers an explicit external bridge host/domain, then a validated host private IP, and keeps `host.openshell.internal` only as a compatibility fallback. `GUARD_BRIDGE_ALLOWED_IPS` covers the SSRF override when the bridge resolves to RFC1918 space.
+
+### A.3 `inference.local` is inference-only
+
+`inference.local` also failed when tried as a generic MCP bridge path under policy restrictions. It should remain the inference hop only, not a sandbox MCP URL.
+
+### A.4 OpenShell binary paths
+
+Binaries inside the sandbox live at `/usr/local/bin/`, not `/usr/bin/`. Network policy `binaries:` entries must match exactly or the OpenShell egress proxy rejects requests from those processes.
+
+### A.5 OpenShell policy entry limit
+
+`openshell policy set` silently drops network policy entries that use `access: full`, and even correctly formatted `protocol: rest` entries beyond the base three (`inference_local`, `openclaw_api`, `openclaw_docs`) may not take effect. MCP host allowlisting therefore relies on NemoClaw presets (generated by `guard/sandbox_policy.py`) plus the Guard-managed runtime allowlist in `gateway.yaml`.
+
+### A.6 Model routing
+
+Models with `nvidia/` prefix (e.g. `nvidia/nemotron-3-super-120b-a12b:free`) are free-tier on OpenRouter, **not** NVIDIA's direct API. `MODEL_ROUTES` in `guard/gateway.py` routes all `org/model` patterns (`nvidia/`, `meta/`, `mistralai/`, `google/`, `microsoft/`, `deepseek/`, `anthropic/`, `openai/`, `openrouter/`) to the `openrouter` provider.
+
+### A.7 Config ownership split (V7)
+
+Before: `nemoclaw-blueprint/blueprint.yaml` held Guard-owned `network:` fields that NemoClaw does not consume; CLI mutations edited YAML on disk while runtime behavior was increasingly HTTP-administered.
+
+After: `gateway.yaml` owns `network.install`, `network.runtime`, `mcp.servers`. `blueprint.yaml` holds only NemoClaw fields. Migration script `tools/migrate_blueprint_to_gateway.py` handles the one-time move.
+
+### A.8 OpenClaw apiKey placeholder
+
+Provider entries in `openclaw.json` carry `apiKey: "guard-managed"` — a placeholder. Real authentication happens at the `inference.local` proxy hop via OpenShell. `allowPrivateNetwork: true` must be set on each provider entry to bypass OpenClaw 2026.4+ SSRF guard for the sandbox proxy.
+
+### A.9 Earlier architecture versions (V1–V6)
+
+V1-V2 used a custom Python CLI driving OpenShell directly. V3-V5 introduced NemoClaw Blueprint-driven inference. V6 added the network authorization layer (install proxy + eBPF capture). V7 split Guard config out of the blueprint. V8 pinned OpenClaw 2026.4.2 as the native-MCP baseline and split MCP rollout into `install_mcp_bridge.sh`. The current document describes V8 (2026-04).
