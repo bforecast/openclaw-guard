@@ -193,19 +193,27 @@ process restart required.
 ```bash
 set -a; source .env; set +a
 
-# 1) Register + approve + allowlist + sandbox preset (hot-reloaded)
+# 1) Register + approve + allowlist + sandbox preset (hot-reloaded).
+#    URL is a positional argument.
 python -m guard.cli mcp install context7 \
-    --url https://mcp.context7.com/mcp \
+    https://mcp.context7.com/mcp \
     --transport streamable_http \
     --by admin
 
-# 2) Activate the bridge, render the combined OpenClaw bundle, sync it into
+# 2) Create the host-to-sandbox bridge record for this MCP.
+python -m guard.cli bridge add context7 \
+    --sandbox my-assistant --workspace .
+
+# 3) Activate the bridge, render the combined OpenClaw bundle, sync it into
 #    the sandbox pod, and (on WSL/Docker Desktop) restart the pod.
 bash install_mcp_bridge.sh context7
 ```
 
-Expected wall clock: ~60s end-to-end for a single new MCP; add ~10s per extra
-bridge re-rendered. The bundle plugin at
+Measured wall clock (WSL + Docker Desktop, context7 as third bridge on top
+of existing earnings+github): step 1 ~8s, step 2 ~2s, step 3 ~39s (activate
++ verify + render all 3 bridges + PVC sync + pod restart); end-to-end
+**~50s**. A round-trip `tools/list` from inside the sandbox measured 0.5s.
+The bundle plugin at
 `sandbox_workspace/openclaw-data/extensions/guard-mcp-bundle/.mcp.json`
 contains all active bridges merged, so existing MCPs (e.g. `github`,
 `earnings`) stay registered.
