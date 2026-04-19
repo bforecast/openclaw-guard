@@ -8,7 +8,7 @@ choose a provider then a model in two steps, and writes the result into:
   3. .env  (PROVIDER_ID=... and MODEL_ID=...)
 
 Designed to run BEFORE gateway starts and BEFORE nemoclaw onboard.
-Embed in install_blueprint_ec2.sh as:
+Embed in install scripts as:
     "$VENV_PYTHON" -m guard.wizard --project-dir "$PROJECT_DIR"
 """
 

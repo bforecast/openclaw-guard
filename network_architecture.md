@@ -24,7 +24,7 @@ flowchart TB
     end
 
     subgraph Install [Install Phase]
-        Sh[install_blueprint_ec2.sh] -->|http_proxy=127.0.0.1:8091| IP[install_proxy.py<br/>HTTP CONNECT splice]
+        Sh[ec2_ubuntu_start.sh / install_blueprint_wsl.sh] -->|http_proxy=127.0.0.1:8091| IP[install_proxy.py<br/>HTTP CONNECT splice]
         IP -->|allow| Net1[github / npm / pypi / ghcr / nodejs]
         IP -.->|deny 403| AuditW[(security_audit.db<br/>network_events)]
     end
@@ -354,7 +354,7 @@ flowchart TB
 | `src/gateway.py`                           | App-layer authorize + record on every upstream    |
 | `src/onboard.py`                           | Projects runtime allow → OpenShell `network_policies` |
 | `src/setup.py`                             | Wizard prompts for install/runtime defaults       |
-| `install_blueprint_ec2.sh`                 | Step 2b/2c/4c — daemons + systemd units           |
+| `ec2_ubuntu_start.sh` / `install_blueprint_wsl.sh` | Step 2b/2c/4c — daemons + systemd units   |
 | `tests/test_network_monitor.py`            | 8 unit tests (decision matrix + persistence)      |
 | `tests/test_install_proxy.py`              | 3 e2e tests (allow / block / audit)               |
 | `tests/test_gateway.py::NetworkAuthorizationTests` | upstream-target + monitor singleton wiring |

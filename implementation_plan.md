@@ -189,7 +189,7 @@ flowchart TB
 | WSL (Windows) | `wsl_start.sh` → `install_blueprint_wsl.sh` | Full stack incl. MCP rollout |
 | AWS EC2 Ubuntu | `ec2_ubuntu_start.sh` | Base stack (Guard + NemoClaw). Runs MCP rollout via `install_mcp_bridge.sh` as a second step. |
 
-Legacy `install_blueprint_ec2.sh` (pre-MCP-rollout split) is retained for reference but the current EC2 path is `ec2_ubuntu_start.sh` + `install_mcp_bridge.sh`.
+Why not the official `curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash`? The upstream wrapper clones into `/tmp` and runs `trap 'rm -rf tmpdir'` on exit, which breaks `npm link` symlinks and leaves `nemoclaw` unusable. Guard also needs to (a) pre-merge its blueprint **before** NemoClaw's first internal onboard, and (b) temporarily unset direct-provider keys so NemoClaw selects the Guard custom endpoint. Neither hook is exposed by the official wrapper. Defaulting OpenClaw to 4.2 upstream does not change any of this — the bypass is about bootstrap lifecycle, not version pinning.
 
 ### 3.2 `ec2_ubuntu_start.sh` execution flow
 

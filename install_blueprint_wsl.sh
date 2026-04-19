@@ -104,38 +104,74 @@ sudo apt-get install -y -q \
 # [1/6] Docker
 # ---------------------------------------------------------------------------
 
-echo "[1/6] Ensuring Docker..."
+echo "[1/6] Ensuring Docker... (background)"
 
-if docker ps >/dev/null 2>&1; then
-  echo "  Docker already reachable (Docker Desktop or running daemon)."
-else
-  # Install docker.io only if not yet available
-  if ! command -v docker >/dev/null 2>&1; then
-    sudo apt-get install -y -q docker.io
+(
+  if docker ps >/dev/null 2>&1; then
+    echo "  Docker already reachable (Docker Desktop or running daemon)."
+  else
+    if ! command -v docker >/dev/null 2>&1; then
+      sudo apt-get install -y -q docker.io
+    fi
+    start_service docker
+    sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
+    sudo usermod -aG docker "$USER" 2>/dev/null || true
+    if ! docker ps >/dev/null 2>&1; then
+      echo "ERROR: Docker socket still inaccessible."
+      echo "  If using Docker Desktop, enable WSL integration in Docker Desktop settings."
+      echo "  If using native dockerd, run: sudo chmod 666 /var/run/docker.sock"
+      exit 1
+    fi
   fi
-  start_service docker
-  sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
-  sudo usermod -aG docker "$USER" 2>/dev/null || true
-  if ! docker ps >/dev/null 2>&1; then
-    echo "ERROR: Docker socket still inaccessible."
-    echo "  If using Docker Desktop, enable WSL integration in Docker Desktop settings."
-    echo "  If using native dockerd, run: sudo chmod 666 /var/run/docker.sock"
-    exit 1
+  echo "  OK Docker ready."
+) &
+PID_DOCKER=$!
+
+# ---------------------------------------------------------------------------
+# [2/6] Python venv + Guard install (parallel with Docker)
+# ---------------------------------------------------------------------------
+
+echo "[2/6] Python environment... (background)"
+(
+  if [[ ! -d "$VENV_DIR" ]]; then
+    python3 -m venv --system-site-packages "$VENV_DIR"
+  fi
+  "$VENV_DIR/bin/pip" install -q --upgrade pip setuptools
+  "$VENV_DIR/bin/pip" install -q -e "$PROJECT_DIR"
+) &
+PID_VENV=$!
+
+# Kick off NemoClaw source refresh decision + download in parallel as well.
+# R3: Only parse Dockerfile.base when user explicitly overrode OPENCLAW_VERSION.
+OPENCLAW_VERSION_EXPLICIT="${OPENCLAW_VERSION+set}"
+NEMOCLAW_SRC="$HOME/.nemoclaw/source"
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.4.2}"
+REFRESH_NEMOCLAW_SOURCE="${REFRESH_NEMOCLAW_SOURCE:-auto}"
+
+need_refresh=0
+[[ ! -f "$NEMOCLAW_SRC/package.json" ]] && need_refresh=1
+[[ "$REFRESH_NEMOCLAW_SOURCE" == "always" ]] && need_refresh=1
+if [[ "$REFRESH_NEMOCLAW_SOURCE" == "auto" && "$need_refresh" -eq 0 && -n "$OPENCLAW_VERSION_EXPLICIT" ]]; then
+  CUR=""
+  [[ -f "$NEMOCLAW_SRC/Dockerfile.base" ]] && \
+    CUR="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' "$NEMOCLAW_SRC/Dockerfile.base" | head -n1 || true)"
+  if [[ -n "$CUR" && "$CUR" != "$OPENCLAW_VERSION" ]]; then
+    echo "  Cached NemoClaw source is OpenClaw $CUR; refreshing to $OPENCLAW_VERSION..."
+    need_refresh=1
   fi
 fi
 
-echo "  OK Docker ready."
-
-# ---------------------------------------------------------------------------
-# [2/6] Python venv + Guard install
-# ---------------------------------------------------------------------------
-
-echo "[2/6] Python environment..."
-if [[ ! -d "$VENV_DIR" ]]; then
-  python3 -m venv --system-site-packages "$VENV_DIR"
+PID_TARBALL=""
+if [[ "$need_refresh" -eq 1 ]]; then
+  echo "  Downloading NemoClaw source tarball... (background)"
+  (
+    rm -rf "$NEMOCLAW_SRC"
+    mkdir -p "$NEMOCLAW_SRC"
+    curl -fsSL https://github.com/NVIDIA/NemoClaw/archive/refs/heads/main.tar.gz \
+      | tar xz --strip-components=1 -C "$NEMOCLAW_SRC"
+  ) &
+  PID_TARBALL=$!
 fi
-"$VENV_DIR/bin/pip" install -q --upgrade pip setuptools
-"$VENV_DIR/bin/pip" install -q -e "$PROJECT_DIR"
 
 # ---------------------------------------------------------------------------
 # [3/6] API keys + Guard admin token
@@ -168,6 +204,9 @@ fi
 # ---------------------------------------------------------------------------
 
 echo "[4/6] Starting Security Gateway on port $GATEWAY_PORT..."
+echo "  Waiting for background Docker + venv jobs to complete..."
+wait "$PID_DOCKER" || { echo "ERROR: Docker setup failed."; exit 1; }
+wait "$PID_VENV"   || { echo "ERROR: Python venv/pip install failed."; exit 1; }
 mkdir -p "$LOGS_DIR"
 lsof -t -i :"$GATEWAY_PORT" 2>/dev/null | xargs kill -9 2>/dev/null || true
 nohup "$VENV_PYTHON" -m guard.gateway > "$LOGS_DIR/gateway.log" 2>&1 &
@@ -215,32 +254,10 @@ export NEMOCLAW_MODEL="${MODEL_ID:-nvidia/nemotron-3-super-120b-a12b:free}"
 export COMPATIBLE_API_KEY="${SAVED_OPENROUTER:-${SAVED_OPENAI:-mock-key}}"
 export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
 
-NEMOCLAW_SRC="$HOME/.nemoclaw/source"
-OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.4.2}"
-REFRESH_NEMOCLAW_SOURCE="${REFRESH_NEMOCLAW_SOURCE:-auto}"
-
-current_src_openclaw_version() {
-  [[ -f "$NEMOCLAW_SRC/Dockerfile.base" ]] && \
-    sed -n 's/^ARG OPENCLAW_VERSION=//p' "$NEMOCLAW_SRC/Dockerfile.base" | head -n1 || true
-}
-
-need_refresh=0
-[[ ! -f "$NEMOCLAW_SRC/package.json" ]] && need_refresh=1
-[[ "$REFRESH_NEMOCLAW_SOURCE" == "always" ]] && need_refresh=1
-if [[ "$REFRESH_NEMOCLAW_SOURCE" == "auto" && "$need_refresh" -eq 0 ]]; then
-  CUR="$(current_src_openclaw_version)"
-  if [[ -n "$CUR" && "$CUR" != "$OPENCLAW_VERSION" ]]; then
-    echo "  Refreshing source ($CUR -> $OPENCLAW_VERSION)..."
-    need_refresh=1
-  fi
-fi
-
-if [[ "$need_refresh" -eq 1 ]]; then
-  echo "  Downloading NemoClaw source tarball..."
-  rm -rf "$NEMOCLAW_SRC"
-  mkdir -p "$NEMOCLAW_SRC"
-  curl -fsSL https://github.com/NVIDIA/NemoClaw/archive/refs/heads/main.tar.gz \
-    | tar xz --strip-components=1 -C "$NEMOCLAW_SRC"
+# Wait for the background NemoClaw tarball download (kicked off after step 0).
+if [[ -n "${PID_TARBALL:-}" ]]; then
+  echo "  Waiting for NemoClaw source download..."
+  wait "$PID_TARBALL" || { echo "ERROR: NemoClaw source download failed."; exit 1; }
 fi
 
 # Pre-merge Guard blueprint

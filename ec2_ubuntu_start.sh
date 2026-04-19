@@ -53,25 +53,72 @@ sudo apt-get install -y \
   ca-certificates curl git jq lsof psmisc expect \
   python3 python3-pip python3-venv
 
-echo "[2/6] Ensuring Docker..."
-if ! command -v docker >/dev/null 2>&1; then
-  echo "  Installing Docker..."
-  sudo apt-get install -y -q docker.io
-  sudo systemctl enable docker >/dev/null 2>&1 || true
-fi
-sudo systemctl start docker || true
-sudo chmod 666 /var/run/docker.sock || true
-sudo usermod -aG docker "$USER" 2>/dev/null || true
-if ! docker info >/dev/null 2>&1; then
-  echo "ERROR: Docker access failed."
-  exit 1
+# ---------------------------------------------------------------------------
+# Parallelize long-running prep: Docker setup, Python venv+pip, and NemoClaw
+# source download are independent and together dominate prefix wall clock.
+# ---------------------------------------------------------------------------
+
+echo "[2/6] Ensuring Docker... (background)"
+(
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "  Installing Docker..."
+    sudo apt-get install -y -q docker.io
+    sudo systemctl enable docker >/dev/null 2>&1 || true
+  fi
+  sudo systemctl start docker || true
+  sudo chmod 666 /var/run/docker.sock || true
+  sudo usermod -aG docker "$USER" 2>/dev/null || true
+  if ! docker info >/dev/null 2>&1; then
+    echo "ERROR: Docker access failed."
+    exit 1
+  fi
+) &
+PID_DOCKER=$!
+
+echo "[3/6] Python environment... (background)"
+(
+  if [[ ! -d "$VENV_DIR" ]]; then
+    python3 -m venv --system-site-packages "$VENV_DIR"
+  fi
+  "$VENV_DIR/bin/pip" install -q -e "$PROJECT_DIR"
+) &
+PID_VENV=$!
+
+# Kick off NemoClaw source refresh decision + download in parallel as well.
+# R3: Only parse Dockerfile.base when user explicitly overrode OPENCLAW_VERSION;
+# otherwise trust the cache and the package.json presence check.
+OPENCLAW_VERSION_EXPLICIT="${OPENCLAW_VERSION+set}"
+NEMOCLAW_SRC="$HOME/.nemoclaw/source"
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.4.2}"
+REFRESH_NEMOCLAW_SOURCE="${REFRESH_NEMOCLAW_SOURCE:-auto}"
+
+need_refresh=0
+if [[ ! -f "$NEMOCLAW_SRC/package.json" ]]; then
+  need_refresh=1
+elif [[ "$REFRESH_NEMOCLAW_SOURCE" == "always" ]]; then
+  need_refresh=1
+elif [[ "$REFRESH_NEMOCLAW_SOURCE" == "auto" && -n "$OPENCLAW_VERSION_EXPLICIT" ]]; then
+  CURRENT_SRC_OPENCLAW_VERSION=""
+  if [[ -f "$NEMOCLAW_SRC/Dockerfile.base" ]]; then
+    CURRENT_SRC_OPENCLAW_VERSION="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' "$NEMOCLAW_SRC/Dockerfile.base" | head -n 1)"
+  fi
+  if [[ -n "$CURRENT_SRC_OPENCLAW_VERSION" && "$CURRENT_SRC_OPENCLAW_VERSION" != "$OPENCLAW_VERSION" ]]; then
+    echo "  Cached NemoClaw source is OpenClaw $CURRENT_SRC_OPENCLAW_VERSION; refreshing to $OPENCLAW_VERSION..."
+    need_refresh=1
+  fi
 fi
 
-echo "[3/6] Python environment..."
-if [[ ! -d "$VENV_DIR" ]]; then
-  python3 -m venv --system-site-packages "$VENV_DIR"
+PID_TARBALL=""
+if [[ "$need_refresh" -eq 1 ]]; then
+  echo "  Downloading NemoClaw source tarball... (background)"
+  (
+    rm -rf "$NEMOCLAW_SRC"
+    mkdir -p "$NEMOCLAW_SRC"
+    curl -fsSL https://github.com/NVIDIA/NemoClaw/archive/refs/heads/main.tar.gz \
+      | tar xz --strip-components=1 -C "$NEMOCLAW_SRC"
+  ) &
+  PID_TARBALL=$!
 fi
-"$VENV_DIR/bin/pip" install -q -e "$PROJECT_DIR"
 
 echo "[4/6] Loading API keys..."
 if [[ -f "$PROJECT_DIR/.env" ]]; then
@@ -92,6 +139,9 @@ if [[ -z "${GUARD_ADMIN_TOKEN:-}" ]]; then
 fi
 
 echo "[5/6] Starting Security Gateway on port $GATEWAY_PORT..."
+echo "  Waiting for background Docker + venv jobs to complete..."
+wait "$PID_DOCKER" || { echo "ERROR: Docker setup failed."; exit 1; }
+wait "$PID_VENV"   || { echo "ERROR: Python venv/pip install failed."; exit 1; }
 mkdir -p "$LOGS_DIR"
 sudo fuser -k "$GATEWAY_PORT/tcp" 2>/dev/null || true
 nohup "$VENV_PYTHON" -m guard.gateway > "$LOGS_DIR/gateway.log" 2>&1 &
@@ -135,39 +185,10 @@ restore_provider_keys() {
 trap restore_provider_keys EXIT
 unset OPENAI_API_KEY ANTHROPIC_API_KEY NVIDIA_API_KEY OPENROUTER_API_KEY
 
-NEMOCLAW_SRC="$HOME/.nemoclaw/source"
-OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.4.2}"
-REFRESH_NEMOCLAW_SOURCE="${REFRESH_NEMOCLAW_SOURCE:-auto}"
-
-download_nemoclaw_source() {
-  echo "Downloading NemoClaw source..."
-  rm -rf "$NEMOCLAW_SRC"
-  mkdir -p "$NEMOCLAW_SRC"
-  curl -fsSL https://github.com/NVIDIA/NemoClaw/archive/refs/heads/main.tar.gz \
-    | tar xz --strip-components=1 -C "$NEMOCLAW_SRC"
-}
-
-current_source_openclaw_version() {
-  if [[ -f "$NEMOCLAW_SRC/Dockerfile.base" ]]; then
-    sed -n 's/^ARG OPENCLAW_VERSION=//p' "$NEMOCLAW_SRC/Dockerfile.base" | head -n 1
-  fi
-}
-
-need_refresh=0
-if [[ ! -f "$NEMOCLAW_SRC/package.json" ]]; then
-  need_refresh=1
-elif [[ "$REFRESH_NEMOCLAW_SOURCE" == "always" ]]; then
-  need_refresh=1
-elif [[ "$REFRESH_NEMOCLAW_SOURCE" == "auto" ]]; then
-  CURRENT_SRC_OPENCLAW_VERSION="$(current_source_openclaw_version || true)"
-  if [[ -n "$CURRENT_SRC_OPENCLAW_VERSION" && "$CURRENT_SRC_OPENCLAW_VERSION" != "$OPENCLAW_VERSION" ]]; then
-    echo "Refreshing cached NemoClaw source (OpenClaw $CURRENT_SRC_OPENCLAW_VERSION -> $OPENCLAW_VERSION)..."
-    need_refresh=1
-  fi
-fi
-
-if [[ "$need_refresh" -eq 1 ]]; then
-  download_nemoclaw_source
+# Wait for the background NemoClaw tarball download (kicked off after step 1).
+if [[ -n "${PID_TARBALL:-}" ]]; then
+  echo "  Waiting for NemoClaw source download..."
+  wait "$PID_TARBALL" || { echo "ERROR: NemoClaw source download failed."; exit 1; }
 fi
 
 echo "Pre-merging Guard blueprint..."
