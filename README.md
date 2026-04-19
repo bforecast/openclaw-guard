@@ -182,6 +182,46 @@ export GUARD_BRIDGE_ALLOWED_IPS=172.17.0.1
 python -m guard.cli onboard --workspace . --sandbox-name openclaw-sandbox --gateway-port 8090
 ```
 
+### 2c. Add a brand-new MCP in two commands
+
+To onboard an MCP that is not yet registered (e.g. `context7`), use the CLI
+instead of editing `gateway.yaml` by hand. `guard mcp install` registers the
+server, approves it, adds the upstream host to `network.runtime.allow` via
+hot-reload, and generates/applies the OpenShell sandbox preset — no gateway
+process restart required.
+
+```bash
+set -a; source .env; set +a
+
+# 1) Register + approve + allowlist + sandbox preset (hot-reloaded)
+python -m guard.cli mcp install context7 \
+    --url https://mcp.context7.com/mcp \
+    --transport streamable_http \
+    --by admin
+
+# 2) Activate the bridge, render the combined OpenClaw bundle, sync it into
+#    the sandbox pod, and (on WSL/Docker Desktop) restart the pod.
+bash install_mcp_bridge.sh context7
+```
+
+Expected wall clock: ~60s end-to-end for a single new MCP; add ~10s per extra
+bridge re-rendered. The bundle plugin at
+`sandbox_workspace/openclaw-data/extensions/guard-mcp-bundle/.mcp.json`
+contains all active bridges merged, so existing MCPs (e.g. `github`,
+`earnings`) stay registered.
+
+Pass `--credential-env VAR_NAME` to `guard mcp install` only when the upstream
+MCP requires a bearer token (Guard injects it at proxy time; the bundle files
+never carry secrets). For troubleshooting (approval state, allowlist entry,
+event counts):
+
+```bash
+python -m guard.cli mcp status context7
+```
+
+See `verification_checklist.md` for the recorded WSL + Docker Desktop lessons
+if the `install_mcp_bridge.sh` PVC sync step does not find the sandbox pod.
+
 ### 3. Start a session
 
 ```bash
