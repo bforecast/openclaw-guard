@@ -854,10 +854,14 @@ async def mcp_list_events(request: Request):
 async def mcp_proxy(server_name: str, path: str, request: Request):
     srv = _mcp_cache.get(server_name)
     if srv is None:
-        return _mcp_error(f"mcp server {server_name!r} not found", status=404)
+        reason = f"mcp server {server_name!r} not found"
+        _log_mcp_event(server_name, "call", decision="block", reason=reason)
+        log.warning("BRIDGE-BLOCKED [%s] not-found: %s", server_name, reason)
+        return _mcp_error(reason, status=404)
     if srv.status != "approved":
         reason = f"mcp server {server_name!r} status={srv.status}"
         _log_mcp_event(server_name, "call", decision="block", reason=reason)
+        log.warning("BRIDGE-BLOCKED [%s] not-approved: %s", server_name, reason)
         return _mcp_error(reason, status=403)
 
     parsed = urlparse(srv.url)
@@ -868,6 +872,10 @@ async def mcp_proxy(server_name: str, path: str, request: Request):
         _log_mcp_event(
             server_name, "call", decision="block", reason=decision.reason,
             upstream_host=host,
+        )
+        log.warning(
+            "BRIDGE-BLOCKED [%s] net-policy %s:%d (%s)",
+            server_name, host, port, decision.reason,
         )
         return _mcp_error(f"network policy blocked: {decision.reason}", status=403)
 
@@ -916,6 +924,10 @@ async def mcp_proxy(server_name: str, path: str, request: Request):
             server_name, "call", decision="block",
             reason=f"upstream error: {exc}", upstream_host=host,
         )
+        log.warning(
+            "BRIDGE-BLOCKED [%s] upstream-error %s: %s",
+            server_name, host, exc,
+        )
         return _mcp_error(f"upstream error: {exc}", status=502)
 
     latency_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
@@ -923,6 +935,11 @@ async def mcp_proxy(server_name: str, path: str, request: Request):
         server_name, "call", decision="allow",
         upstream_host=host, upstream_status=upstream_resp.status_code,
         latency_ms=latency_ms,
+    )
+    log.info(
+        "BRIDGE-ALLOWED [%s] %s %s -> %d (%dms)",
+        server_name, request.method, upstream_url,
+        upstream_resp.status_code, latency_ms,
     )
 
     resp_headers = {
