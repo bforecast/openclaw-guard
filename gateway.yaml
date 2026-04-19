@@ -131,6 +131,11 @@ network:
       - 443
       enforcement: enforce
       purpose: MCP earnings
+    - host: mcp.context7.com
+      ports:
+      - 443
+      enforcement: enforce
+      purpose: MCP context7
 mcp:
   servers:
   - name: github
@@ -149,4 +154,11 @@ mcp:
     registered_at: '2026-04-18T12:00:00.000000+00:00'
     purpose: Earnings MCP (financial earnings data)
     approved_at: '2026-04-18T12:00:00.000000+00:00'
+    approved_by: admin
+  - name: context7
+    url: https://mcp.context7.com/mcp
+    transport: streamable_http
+    status: approved
+    registered_at: '2026-04-19T14:36:06.705453+00:00'
+    approved_at: '2026-04-19T14:36:07.007729+00:00'
     approved_by: admin
