@@ -128,15 +128,59 @@ def _load_runtime_network_allow(workspace_path: Path) -> list[dict]:
     return allow if isinstance(allow, list) else []
 
 
-def _project_network_policies(allow_entries: list[dict]) -> dict:
+def _load_mcp_upstream_hosts(workspace_path: Path) -> set[str]:
+    """Return the set of MCP upstream hostnames declared in gateway.yaml.
+
+    The sandbox reaches these servers exclusively through the Guard gateway
+    reverse proxy at host.openshell.internal:<port>/mcp/<name>/ (bridge
+    model). The actual outbound call to the MCP upstream happens from the
+    gateway process on the host, outside the OpenShell sandbox netns, so
+    mirroring these hosts into the sandbox's network_policies creates dead
+    rules and (worse) offers a sandbox->upstream direct path that bypasses
+    the gateway's BRIDGE-ALLOWED audit + header injection. Returning them
+    here lets :func:`_project_network_policies` skip them.
+    """
+    gw_path = workspace_path / "gateway.yaml"
+    if not gw_path.exists():
+        return set()
+    try:
+        data = yaml.safe_load(gw_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return set()
+    from urllib.parse import urlparse
+    hosts: set[str] = set()
+    for server in ((data.get("mcp") or {}).get("servers") or []):
+        if not isinstance(server, dict):
+            continue
+        url = server.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        hostname = urlparse(url).hostname
+        if hostname:
+            hosts.add(hostname)
+    return hosts
+
+
+def _project_network_policies(
+    allow_entries: list[dict],
+    bridged_mcp_hosts: set[str] | None = None,
+) -> dict:
     """Convert blueprint.network.runtime.allow into the OpenShell
-    network_policies dict consumed by NemoClaw / Landlock."""
+    network_policies dict consumed by NemoClaw / Landlock.
+
+    Hosts in *bridged_mcp_hosts* are skipped because the sandbox reaches
+    them through the gateway reverse proxy, not directly (see
+    :func:`_load_mcp_upstream_hosts`).
+    """
+    skip = bridged_mcp_hosts or set()
     policies: dict[str, dict] = {}
     for entry in allow_entries:
         if not isinstance(entry, dict):
             continue
         host = entry.get("host")
         if not isinstance(host, str) or not host:
+            continue
+        if host in skip:
             continue
         ports_raw = entry.get("ports") or [443]
         ports = [int(p) for p in ports_raw if isinstance(p, (int, str)) and str(p).isdigit()]
@@ -202,7 +246,8 @@ def prepare_onboarding(
     blueprint_policy_path = blueprint_policy_dir / f"{sandbox_name}.yaml"
 
     extra_policies = _project_network_policies(
-        _load_runtime_network_allow(workspace_path)
+        _load_runtime_network_allow(workspace_path),
+        bridged_mcp_hosts=_load_mcp_upstream_hosts(workspace_path),
     )
     _write_policy(
         policy_path,

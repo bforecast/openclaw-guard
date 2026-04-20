@@ -435,6 +435,50 @@ class TestOnboardPolicy(unittest.TestCase):
         endpoint = policies["172_31_12_246"]["endpoints"][0]
         self.assertEqual(endpoint["allowed_ips"], ["172.31.12.246"])
 
+    def test_project_network_policies_skips_bridged_mcp_hosts(self):
+        """MCP upstreams reached via the gateway bridge must not be mirrored
+        into the sandbox network policy (the sandbox only talks to
+        host.openshell.internal:8090 for those).
+        """
+        from guard.onboard import _project_network_policies
+
+        policies = _project_network_policies(
+            [
+                {"host": "api.openai.com", "ports": [443], "purpose": "LLM"},
+                {"host": "mcp.context7.com", "ports": [443], "purpose": "MCP context7"},
+                {"host": "api.githubcopilot.com", "ports": [443], "purpose": "MCP github"},
+            ],
+            bridged_mcp_hosts={"mcp.context7.com", "api.githubcopilot.com"},
+        )
+
+        self.assertIn("api_openai_com", policies)
+        self.assertNotIn("mcp_context7_com", policies)
+        self.assertNotIn("api_githubcopilot_com", policies)
+
+    def test_load_mcp_upstream_hosts_from_gateway_yaml(self):
+        from guard.onboard import _load_mcp_upstream_hosts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "gateway.yaml").write_text(
+                yaml.dump({
+                    "mcp": {"servers": [
+                        {"name": "github", "url": "https://api.githubcopilot.com/mcp/"},
+                        {"name": "context7", "url": "https://mcp.context7.com/mcp"},
+                        {"name": "earnings", "url": "https://earnings-mcp-server.brilliantforecast.workers.dev/mcp"},
+                    ]}
+                }),
+                encoding="utf-8",
+            )
+
+            hosts = _load_mcp_upstream_hosts(workspace)
+
+        self.assertEqual(
+            hosts,
+            {"api.githubcopilot.com", "mcp.context7.com",
+             "earnings-mcp-server.brilliantforecast.workers.dev"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
