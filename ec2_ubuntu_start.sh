@@ -218,6 +218,39 @@ if ! command -v nemoclaw >/dev/null 2>&1; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Post-install policy apply:
+# install.sh only reads the official nemoclaw-blueprint tree, so the
+# Guard policy that `guard.cli onboard` wrote to
+# $PROJECT_DIR/policies/openclaw-sandbox.yaml never reached the sandbox.
+# Re-detect the bridge IP (cluster container is now running, so the more
+# reliable host-gateway probe works), regenerate the policy with
+# allowed_ips populated, and push it via `openshell policy set`. Without
+# this step the sandbox -> Guard bridge is blocked by OpenShell's SSRF
+# guard (which rejects any destination resolving to a private IP unless
+# the IP is explicitly allow-listed in the policy).
+# ---------------------------------------------------------------------------
+echo "Applying network policy with correct allowed_ips..."
+BRIDGE_IP="$(detect_docker_bridge_ip)"
+if [[ -n "$BRIDGE_IP" ]]; then
+  export GUARD_BRIDGE_ALLOWED_IPS="$BRIDGE_IP"
+  echo "  Bridge IP: $BRIDGE_IP"
+  "$VENV_PYTHON" -m guard.cli onboard \
+    --workspace "$PROJECT_DIR" \
+    --sandbox-name openclaw-sandbox \
+    --gateway-port "$GATEWAY_PORT"
+  SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+  if openshell policy set \
+      --policy "$PROJECT_DIR/policies/openclaw-sandbox.yaml" \
+      "$SANDBOX_NAME" --wait 2>&1; then
+    echo "  OK Policy updated: allowed_ips=[$BRIDGE_IP]"
+  else
+    echo "  WARN: openshell policy set failed — approve host.openshell.internal:$GATEWAY_PORT manually."
+  fi
+else
+  echo "  WARN: Bridge IP not detected — skipping policy update."
+fi
+
 echo "Setting inference route..."
 BEST_CRED="OPENROUTER_API_KEY"
 if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then

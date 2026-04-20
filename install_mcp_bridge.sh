@@ -330,16 +330,22 @@ if [[ -f "$BUNDLE_HASH_FILE" ]] \
   echo "  Bundle unchanged (sha256 match); will skip PVC sync + pod restart."
 fi
 
-# WSL + Docker Desktop: the sandbox runs inside a k3s cluster container
-# whose PVC lives in a Docker volume, not on the WSL filesystem.  The
-# host-side BUNDLE_OUTPUT_DIR is not visible inside the pod, so we copy
-# the staged files into the Docker volume and restart the pod once.
+# Docker-in-Docker k3s (WSL + Docker Desktop OR native Docker on EC2/Linux):
+# the sandbox runs inside an openshell-cluster container whose PVC lives
+# in a Docker volume, not on the host filesystem. The host-side
+# BUNDLE_OUTPUT_DIR is not visible inside the pod, so we copy the staged
+# files into the Docker volume and restart the pod once.
+#
+# Historical note: this block was gated on `grep microsoft /proc/version`
+# (WSL-only) until 2026-04-20. That silently skipped the sync on EC2 so
+# `openclaw agent` never saw the bundle. Presence of an
+# `openshell-cluster-*` container is the real signal — it implies k3s
+# + PVC volumes regardless of host kernel.
 if [[ "$SKIP_POD_RESTART" -eq 0 ]] && \
-   grep -qi "microsoft" /proc/version 2>/dev/null && \
    docker ps --format '{{.Names}}' 2>/dev/null | grep -q openshell-cluster; then
   CLUSTER_VOL="openshell-cluster-$GATEWAY_NAME"
   echo ""
-  echo "WSL/Docker Desktop: syncing bundle into k3s PVC ($CLUSTER_VOL)..."
+  echo "Syncing bundle into k3s PVC ($CLUSTER_VOL)..."
   PVC_ROOT=$(docker run --rm -v "${CLUSTER_VOL}:/cluster" alpine \
     find /cluster/storage -maxdepth 1 -name "*${SANDBOX_NAME}*" -type d 2>/dev/null \
     | head -n1)

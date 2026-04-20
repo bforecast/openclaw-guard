@@ -98,6 +98,42 @@ Expected:
 - payload contains `bforecast`
 - `systemPromptReport.tools.entries` contains GitHub MCP tools such as `github__get_me`
 
+## Case 5: Context7 Native MCP from Sandbox
+
+Same recipe as Case 3 (GitHub) with these differences:
+
+- Server name `context7`; upstream `https://mcp.context7.com/mcp`; no
+  credential env.
+- Tool names become `context7__resolve-library-id` and
+  `context7__query-docs`.
+- Upstream returns real snippet counts and version lists (LLM cannot
+  fabricate them) — this makes Case 5 the sharpest anti-hallucination
+  smoke test.
+
+Force a real tool call:
+
+```bash
+openshell sandbox exec --name my-assistant --no-tty --timeout 180 -- \
+  openclaw agent --agent main \
+    -m 'Call context7__resolve-library-id with {"query":"Next.js"}. Output only the raw tool response.'
+```
+
+Expected rows (2026-04-20 values, numbers drift over time):
+
+```
+Context7-compatible library ID: /vercel/next.js    Code Snippets: 2264
+Context7-compatible library ID: /websites/nextjs   Code Snippets: 7157
+Context7-compatible library ID: /llmstxt/nextjs_llms-full_txt   Code Snippets: 40721
+```
+
+Bridge log evidence — pod-source IP `172.18.0.x` is the
+openshell-cluster bridge network:
+
+```
+BRIDGE-ALLOWED [context7] POST https://mcp.context7.com/mcp -> 200 (1195ms)
+172.18.0.2:xxxxx - "POST /mcp/context7/ HTTP/1.1" 200 OK
+```
+
 ## Case 4: Insufficient Credit / Token Limit (Expected 402 from upstream)
 
 Symptoms previously observed:
@@ -335,6 +371,91 @@ is already up the second time — a false recovery.
 
 Miss any one of these and `install_blueprint_wsl.sh` +
 `install_mcp_bridge.sh --all` fails on Docker Desktop in a non-obvious way.
+
+## EC2 + Context7 MCP Lessons (2026-04-20)
+
+Two gaps on the EC2 path that the WSL path had already closed. Both
+block `openclaw agent` from reaching `context7` even when the Guard
+bridge itself proxies fine at the HTTP layer.
+
+### 1. Post-install policy apply was missing on EC2
+
+Diagnostic: OCSF event stream shows paired
+`HTTP:POST [INFO] ALLOWED` → `HTTP:POST [MED] DENIED` for every sandbox
+→ `host.openshell.internal:8090` request; `openshell policy get
+my-assistant` shows no `guard_bridge_host.endpoints[0].allowed_ips`.
+
+Root cause: `ec2_ubuntu_start.sh` exported `GUARD_BRIDGE_ALLOWED_IPS`
+and ran `guard.cli onboard` *before* `install.sh`, but the resulting
+Guard policy (`$PROJECT_DIR/policies/openclaw-sandbox.yaml`) was never
+consumed — `install.sh` reads the pre-merged `$NEMOCLAW_SRC/nemoclaw-blueprint/`
+tree only. The sandbox came up with stock NemoClaw policy, and
+OpenShell's SSRF guard rejected anything resolving to an RFC1918 IP.
+
+Fix (now in `ec2_ubuntu_start.sh` L221–252, ported from
+`install_blueprint_wsl.sh` L286–310): after `install.sh` returns,
+re-detect the bridge IP, re-run `guard.cli onboard` so the policy YAML
+gains `allowed_ips`, then push it with `openshell policy set --policy
+… my-assistant --wait`.
+
+Verify: `openshell policy get my-assistant` shows `Version > 1` and
+the policy contains `guard_bridge_host.endpoints[0].allowed_ips:
+["172.17.0.1"]`.
+
+### 2. `install_mcp_bridge.sh` stops at host staging on EC2
+
+Diagnostic: Host staging succeeds
+(`Combined bundle written to sandbox_workspace/openclaw-data/extensions/guard-mcp-bundle`)
+but `/sandbox/.openclaw-data/extensions/guard-mcp-bundle/` is empty;
+`openclaw plugins list` inside the sandbox does not include
+`guard-mcp-bundle`.
+
+Root cause: The WSL path uses `kubectl delete pod` + PVC replay to
+sync bundle files into the pod; on EC2 the script prints
+sandbox-side copy steps as human instructions and does not execute
+them. Tracked in `implementation_plan.md §6.3`.
+
+Workaround until productized — `openshell sandbox cp` is not a
+subcommand today, so base64-inject through `sandbox exec`. Each exec
+body must be **single-line** (see PowerShell lesson 3), so wrap the
+`mkdir + cat >` sequence as a single encoded blob:
+
+```bash
+PLUGIN_B64=$(base64 -w0 <<<'{ "name": "guard-mcp-bundle" }')
+MCP_B64=$(base64 -w0 <<'JSON'
+{ "mcpServers": { "context7": { "transport": "streamable-http",
+  "url": "http://host.openshell.internal:8090/mcp/context7/" } } }
+JSON
+)
+SCRIPT_B64=$(base64 -w0 <<EOF
+set -e
+B=/sandbox/.openclaw-data/extensions/guard-mcp-bundle
+mkdir -p "\$B/.claude-plugin"
+echo "$PLUGIN_B64" | base64 -d > "\$B/.claude-plugin/plugin.json"
+echo "$MCP_B64"    | base64 -d > "\$B/.mcp.json"
+EOF
+)
+openshell sandbox exec --name my-assistant --no-tty --timeout 20 -- \
+  sh -c "echo $SCRIPT_B64 | base64 -d | sh"
+```
+
+Confirm OpenClaw picked it up:
+
+```bash
+openshell sandbox exec --name my-assistant --no-tty --timeout 20 -- \
+  sh -c 'openclaw plugins list 2>/dev/null | grep guard-mcp-bundle'
+# → guard-mcp-bundle | bundle | loaded | global:guard-mcp-bundle
+```
+
+### Verified Results (2026-04-20, EC2 us-west-1 — context7 E2E)
+
+| Test                                                          | Status | Detail                                                                                     |
+|---------------------------------------------------------------|--------|--------------------------------------------------------------------------------------------|
+| Sandbox bridge reachability after policy fix                  | OK     | curl `/mcp/context7/` initialize → HTTP 200, Context7 v2.1.7 serverInfo                    |
+| `openclaw plugins list` inside sandbox                        | OK     | `guard-mcp-bundle` shown as `loaded`                                                       |
+| `systemPromptReport.tools.entries` from `main` agent          | OK     | Contains `context7__resolve-library-id`, `context7__query-docs`                            |
+| `openclaw agent` tool call `context7__resolve-library-id`      | OK     | Live Next.js rows returned (`/vercel/next.js` 2264 snippets, `/websites/nextjs` 7157, etc.) |
+| `gateway.log` BRIDGE-ALLOWED record                           | OK     | `POST https://mcp.context7.com/mcp -> 200` from pod IP `172.18.0.2`                        |
 
 ## Sandbox Architecture Reference
 
