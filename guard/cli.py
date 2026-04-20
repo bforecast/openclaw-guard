@@ -208,7 +208,12 @@ def _openclaw_bundle_transport_name(transport: str | None) -> str | None:
     if normalized in {"streamable-http", "streamable_http", "http"}:
         return "streamable-http"
     if normalized == "sse":
-        return None
+        # Bundle transport targets the Guard gateway's /mcp/<name>/ reverse
+        # proxy (POST-based streamable-http), not the upstream SSE endpoint.
+        # Returning None here caused OpenClaw's MCP loader to silently skip
+        # SSE-upstream servers (e.g. earnings) at bundle load. Emit
+        # streamable-http so the sandbox sees every approved MCP.
+        return "streamable-http"
     return normalized or None
 
 
