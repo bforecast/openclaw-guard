@@ -330,6 +330,34 @@ else
   echo "  WARN: Bridge IP not detected — skipping policy update."
 fi
 
+# ---------------------------------------------------------------------------
+# Pre-register bridge records for every approved MCP server in gateway.yaml.
+# See ec2_ubuntu_start.sh for rationale.
+# ---------------------------------------------------------------------------
+echo "Pre-registering bridge records for approved MCP servers..."
+SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+APPROVED_MCPS="$(
+  "$VENV_PYTHON" - "$PROJECT_DIR/gateway.yaml" <<'PYEOF'
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1])) or {}
+for s in (cfg.get("mcp", {}) or {}).get("servers", []) or []:
+    if (s.get("status") or "").lower() == "approved" and s.get("name"):
+        print(s["name"])
+PYEOF
+)"
+if [[ -n "$APPROVED_MCPS" ]]; then
+  for MCP_NAME in $APPROVED_MCPS; do
+    "$VENV_PYTHON" -m guard.cli bridge add "$MCP_NAME" \
+      --sandbox "$SANDBOX_NAME" \
+      --workspace "$PROJECT_DIR" \
+      --gateway "http://127.0.0.1:$GATEWAY_PORT" >/dev/null 2>&1 \
+      && echo "  OK registered: $MCP_NAME" \
+      || echo "  WARN: could not register $MCP_NAME (check gateway or token)"
+  done
+else
+  echo "  (no approved MCP servers in gateway.yaml)"
+fi
+
 # Reload PATH after install
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"

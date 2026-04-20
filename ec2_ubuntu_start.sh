@@ -305,6 +305,38 @@ else
   echo "  WARN: Bridge IP not detected — skipping policy update."
 fi
 
+# ---------------------------------------------------------------------------
+# Pre-register bridge records for every approved MCP server in gateway.yaml.
+# `install_mcp_bridge.sh <name>` needs a bridge record before it will
+# activate; pre-registering here makes the MCP rollout phase a single
+# command per bridge (`install_mcp_bridge.sh context7`) instead of two
+# (`guard bridge add context7 && install_mcp_bridge.sh context7`).
+# Idempotent: `guard bridge add` on an existing name is a no-op.
+# ---------------------------------------------------------------------------
+echo "Pre-registering bridge records for approved MCP servers..."
+SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+APPROVED_MCPS="$(
+  "$VENV_PYTHON" - "$PROJECT_DIR/gateway.yaml" <<'PYEOF'
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1])) or {}
+for s in (cfg.get("mcp", {}) or {}).get("servers", []) or []:
+    if (s.get("status") or "").lower() == "approved" and s.get("name"):
+        print(s["name"])
+PYEOF
+)"
+if [[ -n "$APPROVED_MCPS" ]]; then
+  for MCP_NAME in $APPROVED_MCPS; do
+    "$VENV_PYTHON" -m guard.cli bridge add "$MCP_NAME" \
+      --sandbox "$SANDBOX_NAME" \
+      --workspace "$PROJECT_DIR" \
+      --gateway "http://127.0.0.1:$GATEWAY_PORT" >/dev/null 2>&1 \
+      && echo "  OK registered: $MCP_NAME" \
+      || echo "  WARN: could not register $MCP_NAME (check gateway or token)"
+  done
+else
+  echo "  (no approved MCP servers in gateway.yaml)"
+fi
+
 echo "Setting inference route..."
 BEST_CRED="OPENROUTER_API_KEY"
 if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
