@@ -121,15 +121,40 @@ if [[ "$need_refresh" -eq 1 ]]; then
 fi
 
 echo "[4/6] Loading API keys..."
-if [[ -f "$PROJECT_DIR/.env" ]]; then
-  set -a
-  source "$PROJECT_DIR/.env"
-  set +a
+if [[ ! -f "$PROJECT_DIR/.env" ]]; then
+  cat >&2 <<EOF
+ERROR: $PROJECT_DIR/.env not found.
+
+The installer needs upstream provider credentials BEFORE install.sh runs;
+otherwise the script's L178 snapshot captures empty values and the tail
+step 'openshell inference set --credential OPENROUTER_API_KEY' fails with
+"requires local env var to be set to a non-empty value".
+
+Copy .env.example to .env and fill at least OPENROUTER_API_KEY, then rerun.
+If you already have .env on another machine, upload it first:
+  cat /path/to/.env | ssh <host> 'cat > ~/guard/.env && chmod 600 ~/guard/.env'
+EOF
+  exit 1
 fi
+set -a
+source "$PROJECT_DIR/.env"
+set +a
 
 echo "Configured keys:"
 [[ -n "${OPENROUTER_API_KEY:-}" ]] && echo "  OK OpenRouter" || echo "  MISSING OpenRouter"
 [[ -n "${GITHUB_MCP_TOKEN:-}" ]] && echo "  OK GitHub MCP" || echo "  -- GitHub MCP (optional)"
+
+# Fail-fast: at least one upstream provider key must be set. Without it,
+# install.sh phase 4 gateway inference config still succeeds (uses
+# COMPATIBLE_API_KEY=mock-key fallback on L171), sandbox is still created,
+# but the post-install 'openshell inference set --credential OPENROUTER_API_KEY'
+# step fails, and every later agent call returns 401 from the upstream. Catch
+# it upfront rather than after 9 minutes of install.
+if [[ -z "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}${ANTHROPIC_API_KEY:-}" ]]; then
+  echo "ERROR: no upstream provider key set in $PROJECT_DIR/.env" >&2
+  echo "  Need at least one of: OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY" >&2
+  exit 1
+fi
 
 if [[ -z "${GUARD_ADMIN_TOKEN:-}" ]]; then
   GUARD_ADMIN_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
@@ -240,8 +265,37 @@ if [[ -n "$BRIDGE_IP" ]]; then
     --sandbox-name openclaw-sandbox \
     --gateway-port "$GATEWAY_PORT"
   SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+  # OpenShell 2026.4.2 rejects live-sandbox mutations to filesystem_policy
+  # (include_workdir toggle, /sandbox moving between read_only/read_write,
+  # etc.). Recent NemoClaw install.sh (post 2026-04-17) ships phase-8
+  # policy presets (npm/pypi/huggingface/brew/brave) that replace the
+  # blueprint policy with a minimal default whose filesystem section
+  # diverges from Guard's onboard template, so `openshell policy set`
+  # then fails 'InvalidArgument: cannot be changed on a live sandbox'.
+  #
+  # Fix: preserve whatever filesystem_policy install.sh left in live, and
+  # only land our network_policies (bridge host + allowed_ips + MCP egress
+  # hosts). `openshell policy get --full` prints a metadata header + a
+  # YAML separator + the policy body, so we load_all and take the last
+  # document.
+  LIVE_POLICY_FILE="$PROJECT_DIR/policies/_live_policy.yaml"
+  GUARD_POLICY_FILE="$PROJECT_DIR/policies/openclaw-sandbox.yaml"
+  if openshell policy get "$SANDBOX_NAME" --full > "$LIVE_POLICY_FILE" 2>/dev/null; then
+    "$VENV_PYTHON" - "$LIVE_POLICY_FILE" "$GUARD_POLICY_FILE" <<'PYEOF'
+import sys, yaml
+live_path, guard_path = sys.argv[1], sys.argv[2]
+docs = list(yaml.safe_load_all(open(live_path)))
+live = next((d for d in reversed(docs) if isinstance(d, dict) and "filesystem_policy" in d), None)
+guard = yaml.safe_load(open(guard_path))
+if live is not None:
+    guard["filesystem_policy"] = live["filesystem_policy"]
+    with open(guard_path, "w") as f:
+        yaml.safe_dump(guard, f, sort_keys=False)
+    print(f"  Spliced live filesystem_policy (include_workdir={live['filesystem_policy'].get('include_workdir')})")
+PYEOF
+  fi
   if openshell policy set \
-      --policy "$PROJECT_DIR/policies/openclaw-sandbox.yaml" \
+      --policy "$GUARD_POLICY_FILE" \
       "$SANDBOX_NAME" --wait 2>&1; then
     echo "  OK Policy updated: allowed_ips=[$BRIDGE_IP]"
   else

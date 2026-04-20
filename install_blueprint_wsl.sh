@@ -298,8 +298,29 @@ if [[ -n "$BRIDGE_IP" ]]; then
     --sandbox-name openclaw-sandbox \
     --gateway-port "$GATEWAY_PORT"
   SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+  # See ec2_ubuntu_start.sh for rationale. Recent NemoClaw install.sh
+  # (post 2026-04-17) phase-8 presets diverge live filesystem_policy from
+  # Guard's onboard template, and OpenShell 2026.4.2 rejects live
+  # mutations to filesystem_policy. Preserve live filesystem, splice
+  # Guard network_policies only.
+  LIVE_POLICY_FILE="$PROJECT_DIR/policies/_live_policy.yaml"
+  GUARD_POLICY_FILE="$PROJECT_DIR/policies/openclaw-sandbox.yaml"
+  if openshell policy get "$SANDBOX_NAME" --full > "$LIVE_POLICY_FILE" 2>/dev/null; then
+    "$VENV_PYTHON" - "$LIVE_POLICY_FILE" "$GUARD_POLICY_FILE" <<'PYEOF'
+import sys, yaml
+live_path, guard_path = sys.argv[1], sys.argv[2]
+docs = list(yaml.safe_load_all(open(live_path)))
+live = next((d for d in reversed(docs) if isinstance(d, dict) and "filesystem_policy" in d), None)
+guard = yaml.safe_load(open(guard_path))
+if live is not None:
+    guard["filesystem_policy"] = live["filesystem_policy"]
+    with open(guard_path, "w") as f:
+        yaml.safe_dump(guard, f, sort_keys=False)
+    print(f"  Spliced live filesystem_policy (include_workdir={live['filesystem_policy'].get('include_workdir')})")
+PYEOF
+  fi
   if openshell policy set \
-      --policy "$PROJECT_DIR/policies/openclaw-sandbox.yaml" \
+      --policy "$GUARD_POLICY_FILE" \
       "$SANDBOX_NAME" --wait 2>&1; then
     echo "  OK Policy updated: allowed_ips=[$BRIDGE_IP]"
   else
