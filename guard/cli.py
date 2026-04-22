@@ -280,40 +280,7 @@ def _merge_openclaw_bundle_enable_config(
     return data
 
 
-def _mcporter_transport_name(transport: str | None) -> str:
-    if transport in {"streamable-http", "streamable_http"}:
-        return "http"
-    return transport or "sse"
 
-
-def _render_mcporter_server_config(row: dict, gateway_port: int) -> dict:
-    bridge_url = _bridge_url(row, gateway_port)
-    entry: dict[str, object] = {
-        "baseUrl": bridge_url,
-    }
-    transport = _mcporter_transport_name(str(row.get("transport") or "sse"))
-    if transport and transport != "sse":
-        entry["transport"] = transport
-    credential_env = row.get("credential_env")
-    if credential_env:
-        entry["headers"] = {
-            # mcporter resolves $env:VAR at runtime; the real token stays on the host/sandbox env
-            "Authorization": f"$env:{credential_env}",
-        }
-    purpose = row.get("purpose")
-    if purpose:
-        entry["description"] = str(purpose)
-    return entry
-
-
-def _render_mcporter_add_command(name: str, row: dict, gateway_port: int) -> str:
-    bridge_url = _bridge_url(row, gateway_port)
-    transport = _mcporter_transport_name(str(row.get("transport") or "sse"))
-    command = f"mcporter config add '{name}' --url '{bridge_url}'"
-    if transport:
-        command += f" --transport '{transport}'"
-    command += " --scope home"
-    return command
 
 
 def _default_bridge_host_candidates() -> list[str]:
@@ -386,16 +353,7 @@ def _collect_bridge_rows(workspace: str, sandbox_name: str | None) -> list[dict]
     return [row for row in rows if row.get("name")]
 
 
-def _build_mcporter_payload(rows: list[dict], gateway_port: int, active_only: bool) -> dict:
-    mcp_servers: dict[str, dict] = {}
-    for row in rows:
-        if active_only and row.get("status") != "active":
-            continue
-        name = str(row.get("name") or "")
-        if not name:
-            continue
-        mcp_servers[name] = _render_mcporter_server_config(row, gateway_port)
-    return {"mcpServers": mcp_servers}
+
 
 # ---------------------------------------------------------------------------
 # All providers that we register. Each one points to our security gateway
@@ -1364,7 +1322,7 @@ def bridge_add(
     typer.echo("Next implementation steps for this bridge record:")
     typer.echo("  1. Start a host-side stdio->HTTP MCP proxy for the approved server.")
     typer.echo("  2. Allow the sandbox to reach that host endpoint via OpenShell policy/runtime rules.")
-    typer.echo("  3. Register the bridged HTTP endpoint with sandbox-side mcporter/OpenClaw consumption.")
+    typer.echo("  3. Register the bridged HTTP endpoint with sandbox-side OpenClaw consumption.")
 
 
 @bridge_app.command("activate")
@@ -1560,9 +1518,9 @@ def bridge_render(
     workspace: str = typer.Option(".", "--workspace", help="Project root used for bridge state"),
     gateway_port: int = typer.Option(8090, "--gateway-port", help="Default Guard/bridge port"),
     output_format: str = typer.Option(
-        "mcporter",
+        "openclaw",
         "--format",
-        help="mcporter | openclaw | json | env",
+        help="openclaw | json | env",
     ),
 ):
     """Render the planned bridge into a consumer-facing config snippet.
@@ -1597,19 +1555,6 @@ def bridge_render(
         typer.echo(json.dumps(rendered, indent=2, sort_keys=True))
         return
 
-    if output_format == "mcporter":
-        mcporter_payload = {
-            "mcpServers": {
-                str(row.get("name") or name): _render_mcporter_server_config(row, gateway_port)
-            }
-        }
-        typer.echo("# mcporter config snippet")
-        typer.echo(json.dumps(mcporter_payload, indent=2, sort_keys=True))
-        typer.echo("")
-        typer.echo("# Preferred sandbox registration command")
-        typer.echo(f"#   {_render_mcporter_add_command(name, row, gateway_port)}")
-        return
-
     if output_format == "env":
         typer.echo(f"GUARD_BRIDGE_NAME={rendered['name']}")
         typer.echo(f"GUARD_BRIDGE_SANDBOX={rendered['sandbox']}")
@@ -1621,7 +1566,7 @@ def bridge_render(
 
     if output_format != "openclaw":
         typer.secho(
-            f"ERROR: unsupported format {output_format!r}; use mcporter, openclaw, json, or env",
+            f"ERROR: unsupported format {output_format!r}; use openclaw, json, or env",
             fg=typer.colors.RED,
         )
         raise typer.Exit(2)
@@ -1649,22 +1594,7 @@ def bridge_render(
     )
 
 
-@bridge_app.command("render-mcporter-add")
-def bridge_render_mcporter_add(
-    name: str = typer.Argument(..., help="Bridge/MCP server name"),
-    sandbox_name: str = typer.Option("my-assistant", "--sandbox", help="Target NemoClaw sandbox"),
-    workspace: str = typer.Option(".", "--workspace", help="Project root used for bridge state"),
-    gateway_port: int = typer.Option(8090, "--gateway-port", help="Default Guard/bridge port"),
-):
-    """Render the preferred sandbox-side mcporter registration command."""
-    row = bridge_state.get_bridge(workspace, sandbox_name, name)
-    if not row:
-        typer.secho(
-            f"ERROR: no bridge record named {name!r} for sandbox {sandbox_name!r}",
-            fg=typer.colors.RED,
-        )
-        raise typer.Exit(1)
-    typer.echo(_render_mcporter_add_command(name, row, gateway_port))
+
 
 
 @bridge_app.command("render-openclaw-bundle")
@@ -1883,13 +1813,17 @@ def bridge_print_sandbox_steps(
         help="Show only active bridges by default",
     ),
 ):
-    """Print the concrete host + sandbox validation steps for native MCP first.
+    """Print the concrete host + sandbox validation steps for native MCP.
 
     This is a guidance command only. It does not execute remote operations.
     """
     rows = _collect_bridge_rows(workspace, sandbox_name)
-    payload = _build_mcporter_payload(rows, gateway_port, active_only)
-    if not payload["mcpServers"]:
+    active_rows = sorted(
+        ((str(r.get("name")), r) for r in rows if (not active_only or r.get("status") == "active")),
+        key=lambda item: item[0],
+    )
+    active_names = [name for name, _ in active_rows]
+    if not active_names:
         state_desc = "active" if active_only else "matching"
         typer.secho(
             f"ERROR: no {state_desc} bridge records found for sandbox {sandbox_name!r}",
@@ -1897,50 +1831,22 @@ def bridge_print_sandbox_steps(
         )
         raise typer.Exit(1)
 
-    active_rows = sorted(
-        ((str(r.get("name")), r) for r in rows if (not active_only or r.get("status") == "active")),
-        key=lambda item: item[0],
-    )
-    names = ", ".join(sorted(payload["mcpServers"].keys()))
+    names = ", ".join(active_names)
     typer.echo("Host side")
     typer.echo(
         "1. Ensure the host-side bridge runtime is active:\n"
         + "\n".join(
             f"   guard bridge activate {name} --sandbox {sandbox_name} --workspace {workspace}"
-            for name in sorted(payload["mcpServers"].keys())
+            for name in active_names
         )
     )
     typer.echo("")
     typer.echo("Sandbox side")
     typer.echo(
-        "2. Preferred path: stage the OpenClaw native MCP bundle:\n"
+        "2. Stage the OpenClaw native MCP bundle:\n"
         + "\n".join(
             f"   python -m guard.cli bridge render-openclaw-bundle {name} --sandbox {sandbox_name} --workspace {workspace} --gateway-port {gateway_port}"
             for name, _ in active_rows
-        )
-    )
-    typer.echo("")
-    typer.echo(
-        "3. Optional debug path: register the bridge in sandbox mcporter:\n"
-        + "\n".join(
-            f"   npx -y {_render_mcporter_add_command(name, row, gateway_port)}"
-            for name, row in active_rows
-        )
-    )
-    typer.echo("")
-    typer.echo(
-        "4. Optional debug check: verify mcporter sees the configured servers:\n"
-        + "\n".join(
-            "   npx -y mcporter list"
-            for _, row in active_rows[:1]
-        )
-    )
-    typer.echo("")
-    typer.echo(
-        f"5. Optional debug check: verify the specific bridged server schemas:\n"
-        + "\n".join(
-            f"   npx -y mcporter list {name} --schema"
-            for name, row in active_rows
         )
     )
     typer.echo("")
@@ -1951,7 +1857,7 @@ def bridge_print_sandbox_steps(
     )
     typer.echo("")
     typer.echo(
-        "6. Optional direct bridge probe from inside the sandbox:\n"
+        "3. Optional direct bridge probe from inside the sandbox:\n"
         + "\n".join(
             f"   curl -sS http://{str(row.get('host_alias') or _default_bridge_host())}:{_bridge_port(row, gateway_port)}/mcp/{name}/"
             for name, row in active_rows
@@ -1969,7 +1875,7 @@ def bridge_verify_runtime(
     gateway_url: str = typer.Option("http://127.0.0.1:8090", "--gateway"),
     gateway_port: int = typer.Option(8090, "--gateway-port", help="Default Guard/bridge port"),
 ):
-    """Verify that the host-side bridge runtime is ready for sandbox mcporter registration."""
+    """Verify that the host-side bridge runtime is ready for sandbox consumption."""
     row = bridge_state.get_bridge(workspace, sandbox_name, name)
     if not row:
         typer.secho(
@@ -2004,10 +1910,6 @@ def bridge_verify_runtime(
         "Next step:  "
         f"python -m guard.cli bridge stage-openclaw-bundle {name} --sandbox {sandbox_name} "
         f"--workspace {workspace} --output-dir {Path(workspace).resolve() / 'sandbox_workspace' / 'openclaw-data' / 'extensions' / 'guard-mcp-bundle'}"
-    )
-    typer.echo(
-        "Debug alt:  "
-        f"{_render_mcporter_add_command(name, row, gateway_port)}"
     )
     if failed:
         raise typer.Exit(1)

@@ -186,7 +186,7 @@ BUNDLE_OUTPUT_DIR="$WORKSPACE/sandbox_workspace/openclaw-data/extensions/$BUNDLE
 
 # Fail fast if any selected bridge's upstream MCP server declares a
 # credential_env that is unset on the host.  Catches "forgot to source .env"
-# before we burn ~60s on activate/verify/stage only to have mcporter 401 in
+# before we burn ~60s on activate/verify/stage only to have the sandbox 401 in
 # the sandbox.
 MISSING_CREDS=$(
   "$VENV_PYTHON" - "$GATEWAY_URL" "${BRIDGES[@]}" <<'PY'
@@ -262,11 +262,7 @@ for BRIDGE_NAME in "${BRIDGES[@]}"; do
     --plugin-id "$BUNDLE_PLUGIN_ID"
 
   echo ""
-  echo "Optional mcporter debug command:"
-  "$VENV_PYTHON" -m guard.cli bridge render-mcporter-add "$BRIDGE_NAME" \
-    --sandbox "$SANDBOX_NAME" \
-    --workspace "$WORKSPACE" \
-    --gateway-port "$BRIDGE_PORT"
+
 done
 
 # ---------------------------------------------------------------------------

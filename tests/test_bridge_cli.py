@@ -234,7 +234,7 @@ class BridgeCliTests(unittest.TestCase):
         self.assertIn('"enabled": true', result.stdout)
         self.assertNotIn('"baseUrl"', result.stdout)
 
-    def test_bridge_render_defaults_to_mcporter_config(self):
+    def test_bridge_render_defaults_to_openclaw_format(self):
         state_path = self._state_path()
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(
@@ -272,10 +272,8 @@ class BridgeCliTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertIn('"mcpServers"', result.stdout)
-        self.assertIn('"baseUrl": "http://host.openshell.internal:8090/mcp/github/"', result.stdout)
-        self.assertIn('"Authorization": "$env:GITHUB_MCP_TOKEN"', result.stdout)
-        self.assertIn("mcporter config add 'github'", result.stdout)
+        self.assertIn("openclaw mcp set github", result.stdout)
+        self.assertIn("http://host.openshell.internal:8090/mcp/github/", result.stdout)
 
     def test_bridge_render_openclaw_bundle_omits_transport_for_sse(self):
         state_path = self._state_path()
@@ -424,6 +422,7 @@ class BridgeCliTests(unittest.TestCase):
                 "mcpServers": {
                     "docs": {
                         "url": "http://host.openshell.internal:8090/mcp/docs/",
+                        "transport": "streamable-http",
                     }
                 }
             },
@@ -636,6 +635,7 @@ class BridgeCliTests(unittest.TestCase):
                     "--workspace",
                     str(self.workspace),
                     "--auto-detect-host-alias",
+                    "--force-probe",
                 ],
             )
         self.assertEqual(result.exit_code, 0)
@@ -645,47 +645,7 @@ class BridgeCliTests(unittest.TestCase):
         entry = saved["sandboxes"]["my-assistant"]["bridges"]["github"]
         self.assertEqual(entry["host_alias"], "172.31.12.246")
 
-    def test_bridge_render_mcporter_add_outputs_command(self):
-        state_path = self._state_path()
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "sandboxes": {
-                        "my-assistant": {
-                            "bridges": {
-                                "github": {
-                                    "status": "active",
-                                    "transport": "streamable-http",
-                                    "host_alias": "host.openshell.internal",
-                                    "upstream_url": "https://api.githubcopilot.com/mcp/",
-                                    "credential_env": "GITHUB_MCP_TOKEN",
-                                }
-                            }
-                        }
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-        result = self.runner.invoke(
-            app,
-            [
-                "bridge",
-                "render-mcporter-add",
-                "github",
-                "--sandbox",
-                "my-assistant",
-                "--workspace",
-                str(self.workspace),
-            ],
-        )
-        self.assertEqual(result.exit_code, 0)
-        self.assertIn(
-            "mcporter config add 'github' --url 'http://host.openshell.internal:8090/mcp/github/' --transport 'http' --scope home",
-            result.stdout,
-        )
+
 
     def test_bridge_print_sandbox_steps_includes_verification_commands(self):
         state_path = self._state_path()
@@ -723,18 +683,11 @@ class BridgeCliTests(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0)
         self.assertIn("guard bridge activate github --sandbox my-assistant", result.stdout)
-        self.assertIn("Preferred path: stage the OpenClaw native MCP bundle", result.stdout)
+        self.assertIn("Stage the OpenClaw native MCP bundle", result.stdout)
         self.assertIn(
             "python -m guard.cli bridge render-openclaw-bundle github --sandbox my-assistant --workspace",
             result.stdout,
         )
-        self.assertIn("Optional debug path: register the bridge in sandbox mcporter", result.stdout)
-        self.assertIn(
-            "npx -y mcporter config add 'github' --url 'http://host.openshell.internal:8090/mcp/github/' --transport 'http' --scope home",
-            result.stdout,
-        )
-        self.assertIn("npx -y mcporter list", result.stdout)
-        self.assertIn("npx -y mcporter list github --schema", result.stdout)
         self.assertIn("keep the default proxy environment enabled", result.stdout)
 
     def test_bridge_verify_runtime_reports_success(self):
@@ -782,8 +735,7 @@ class BridgeCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("OK       bridge is active", result.stdout)
         self.assertIn("OK       gateway MCP server approved", result.stdout)
-        self.assertIn("mcporter config add 'github'", result.stdout)
-        self.assertIn("--transport 'http'", result.stdout)
+        self.assertIn("stage-openclaw-bundle", result.stdout)
 
     def test_bridge_print_sandbox_steps_uses_custom_host_alias(self):
         state_path = self._state_path()
@@ -823,7 +775,7 @@ class BridgeCliTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Preferred path: stage the OpenClaw native MCP bundle", result.stdout)
+        self.assertIn("Stage the OpenClaw native MCP bundle", result.stdout)
         self.assertNotIn("NO_PROXY=", result.stdout)
         self.assertIn("http://172.31.12.246:18090/mcp/github/", result.stdout)
 

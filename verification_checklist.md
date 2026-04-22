@@ -241,7 +241,7 @@ OpenShell sandbox commands.
 6. If a bridge or MCP test fails, separate the layers:
    - direct upstream test
    - Guard host-side bridge test
-   - sandbox-side `mcporter` or OpenClaw test
+   - sandbox-side OpenClaw test
 
 ### Guard-specific lessons from this project
 
@@ -256,8 +256,6 @@ OpenShell sandbox commands.
    `ECONNREFUSED`, while proxied requests to
    `http://host.openshell.internal:8090/...` succeeded.
 
-4. `mcporter` is debug-only for this project now
-   - native OpenClaw MCP is the primary consumer path
 
 5. A successful `GET /mcp` or bridge activation does not prove MCP usability
    - always test actual MCP initialize / native tool execution

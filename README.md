@@ -172,8 +172,6 @@ All `guard mcp …` commands are thin wrappers over the gateway admin API. All `
 
 Primary: **OpenClaw 4.2 native bundle plugin**. `install_mcp_bridge.sh` stages `.claude-plugin/plugin.json` + `.mcp.json` under the sandbox extensions dir and the merged bundle covers all active bridges.
 
-Optional debug path: sandbox-side `mcporter` registration via `guard bridge render-mcporter-add …`.
-
 ---
 
 ## Configuration
