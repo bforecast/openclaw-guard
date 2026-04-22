@@ -39,6 +39,7 @@ OpenClaw `2026.4.2` is the pinned baseline (native MCP supported). Override only
 | --------------- | ------------------------------------------- | ------------------------------------------------------------ |
 | AWS EC2 Ubuntu  | `bash ec2_ubuntu_start.sh`                  | Full path: deps → Docker → Guard → NemoClaw onboard.         |
 | Windows WSL2    | `bash install_blueprint_wsl.sh`             | Docker Desktop + k3s cluster.                                |
+| macOS (Mac Mini)| `bash install_blueprint_mac.sh`             | Docker Desktop for Mac + k3s cluster.                        |
 | Local dev       | `pip install -e . && python -m guard.cli …` | No sandbox; gateway-only.                                    |
 
 The install script starts the Guard gateway on `:8090`, pre-merges `nemoclaw-blueprint/blueprint.yaml` into the NemoClaw source tree, runs the official `install.sh`, then repoints the OpenShell inference route to Guard.

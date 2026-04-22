@@ -133,7 +133,9 @@ BRIDGE_STATE="$WORKSPACE/.guard/mcp-bridges.json"
 # would shrink the bundle to just that one server and evict the others).
 ALL_BRIDGES=()
 if [[ -f "$BRIDGE_STATE" ]]; then
-  mapfile -t ALL_BRIDGES < <("$VENV_PYTHON" - <<'PY' "$BRIDGE_STATE" "$SANDBOX_NAME"
+  while IFS= read -r _bridge_name; do
+    [[ -n "$_bridge_name" ]] && ALL_BRIDGES+=("$_bridge_name")
+  done < <("$VENV_PYTHON" - <<'PY' "$BRIDGE_STATE" "$SANDBOX_NAME"
 import json
 import sys
 from pathlib import Path

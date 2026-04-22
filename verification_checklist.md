@@ -11,7 +11,7 @@ runtime architecture (V8, updated through 2026-04-16):
 
 ## Prerequisites
 
-- EC2 instance with `ec2_ubuntu_start.sh` completed, or WSL with `install_blueprint_wsl.sh`.
+- EC2 instance with `ec2_ubuntu_start.sh` completed, WSL with `install_blueprint_wsl.sh`, or macOS with `install_blueprint_mac.sh`.
 - `.env` includes at least `OPENROUTER_API_KEY`.
 - For MCP testing: `GITHUB_MCP_TOKEN` in `.env`.
 
