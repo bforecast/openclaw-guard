@@ -44,14 +44,22 @@ OpenClaw `2026.4.2` is the pinned baseline (native MCP supported). Override only
 
 The install script starts the Guard gateway on `:8090`, pre-merges `nemoclaw-blueprint/blueprint.yaml` into the NemoClaw source tree, runs the official `install.sh`, then repoints the OpenShell inference route to Guard.
 
-### 3. Start a session
+### 3. Start / stop / status
+
+```bash
+bash guard.sh start              # resume all services (Colima → Gateway → Sandbox)
+bash guard.sh stop               # pause all, free CPU + memory
+bash guard.sh status             # quick health check
+```
+
+### 4. Start a session
 
 ```bash
 nemoclaw my-assistant connect
 openclaw tui
 ```
 
-### 4. Verify
+### 5. Verify
 
 ```bash
 curl http://127.0.0.1:8090/health                                  # gateway up
@@ -249,6 +257,15 @@ curl -X POST -H "Authorization: Bearer $GUARD_ADMIN_TOKEN" http://127.0.0.1:8090
 sudo systemctl status guard-gateway
 sudo systemctl status guard-network-capture
 sudo systemctl restart guard-gateway
+```
+
+### Service control (macOS / WSL)
+
+```bash
+bash guard.sh start              # Colima/Docker → Guard gateway → NemoClaw sandbox
+bash guard.sh stop               # Sandbox → gateway → Colima/Docker (frees CPU + RAM)
+bash guard.sh status             # Docker, gateway health, sandbox state
+bash guard.sh start my-sandbox   # non-default sandbox name
 ```
 
 ### Security tests
