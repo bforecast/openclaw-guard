@@ -40,7 +40,7 @@ OpenClaw `2026.4.2` is the pinned baseline (native MCP supported). Override only
 | AWS EC2 Ubuntu  | `bash ec2_ubuntu_start.sh`                  | Full path: deps → Docker → Guard → NemoClaw onboard.         |
 | Windows WSL2    | `bash install_blueprint_wsl.sh`             | Docker Desktop + k3s cluster.                                |
 | macOS (Mac Mini)| `bash install_blueprint_mac.sh`             | Docker Desktop for Mac + k3s cluster.                        |
-| Local dev       | `pip install -e . && python -m guard.cli …` | No sandbox; gateway-only.                                    |
+| Local dev       | `pip install -e . && python -m guard.cli ...` | No sandbox; gateway-only.                                    |
 
 The install script starts the Guard gateway on `:8090`, pre-merges `nemoclaw-blueprint/blueprint.yaml` into the NemoClaw source tree, runs the official `install.sh`, then repoints the OpenShell inference route to Guard.
 
@@ -86,7 +86,7 @@ flowchart LR
     end
     subgraph Upstream
       L["OpenRouter / OpenAI / Anthropic / NVIDIA"]
-      M["Approved MCP upstreams (github, context7, …)"]
+      M["Approved MCP upstreams (github, context7, ...)"]
     end
     S -- inference.local --> I --> L
     S -- host bridge --> B --> M
@@ -148,23 +148,23 @@ guard mcp install slack --credential-env MY_SLACK_TOKEN --by alice
 | Command                                             | Purpose                                                  |
 | --------------------------------------------------- | -------------------------------------------------------- |
 | `guard mcp templates`                               | List built-in templates.                                 |
-| `guard mcp install <name> [url] …`                  | Register + approve + allowlist + sandbox preset.         |
+| `guard mcp install <name> [url] ...`                  | Register + approve + allowlist + sandbox preset.         |
 | `guard mcp status <name>`                           | Approval state, allowlist entry, event counts.           |
 | `guard mcp uninstall <name>`                        | Revoke + remove + drop allowlist entry.                  |
 | `guard mcp list` / `guard mcp logs [--limit N]`     | Inspect server registry and audit events.                |
-| `guard bridge add <name> --sandbox … --workspace …` | Create a host-to-sandbox bridge record.                  |
-| `guard bridge activate <name> …`                    | Mark bridge active; `--auto-detect-host-alias` supported.|
+| `guard bridge add <name> --sandbox ... --workspace ...` | Create a host-to-sandbox bridge record.                  |
+| `guard bridge activate <name> ...`                    | Mark bridge active; `--auto-detect-host-alias` supported.|
 | `guard bridge list --workspace .`                   | Show all bridges and their runtime state.                |
-| `guard bridge render-openclaw-bundle <name> …`      | Render OpenClaw 4.2 native bundle plugin files.          |
-| `guard bridge verify-runtime <name> …`              | Check gateway accepts `/mcp/<name>/` requests.           |
+| `guard bridge render-openclaw-bundle <name> ...`      | Render OpenClaw 4.2 native bundle plugin files.          |
+| `guard bridge verify-runtime <name> ...`              | Check gateway accepts `/mcp/<name>/` requests.           |
 
-All `guard mcp …` commands are thin wrappers over the gateway admin API. All `guard bridge …` commands manage compatibility-layer state in `.guard/mcp-bridges.json`.
+All `guard mcp ...` commands are thin wrappers over the gateway admin API. All `guard bridge ...` commands manage compatibility-layer state in `.guard/mcp-bridges.json`.
 
 ### Sandbox consumption path
 
 Primary: **OpenClaw 4.2 native bundle plugin**. `install_mcp_bridge.sh` stages `.claude-plugin/plugin.json` + `.mcp.json` under the sandbox extensions dir and the merged bundle covers all active bridges.
 
-Optional debug path: sandbox-side `mcporter` registration via `guard bridge render-mcporter-add …`.
+Optional debug path: sandbox-side `mcporter` registration via `guard bridge render-mcporter-add ...`.
 
 ---
 
@@ -207,7 +207,7 @@ Enforcement levels: `enforce` (blocks on deny), `warn` (audit-only), `monitor` (
 | `GUARD_BRIDGE_HOST`            | Sandbox-visible bridge hostname (prefer a routable external DNS).|
 | `GUARD_BRIDGE_PORT`            | Sandbox-visible bridge port (defaults to `GATEWAY_PORT`).        |
 | `GUARD_BRIDGE_ALLOWED_IPS`     | RFC1918 IP to insert into OpenShell `allowed_ips` for SSRF override. |
-| `OPENROUTER_API_KEY`, …        | Upstream provider credentials.                                   |
+| `OPENROUTER_API_KEY`, ...        | Upstream provider credentials.                                   |
 
 `host.openshell.internal` is a compatibility fallback only; prefer a real external bridge host for multi-machine deployments.
 
